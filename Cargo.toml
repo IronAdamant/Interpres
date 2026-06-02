@@ -5,7 +5,7 @@ edition = "2021"
 description = "Privacy-first local AI communication appliance (zero-dependency core)"
 license = "MIT OR Apache-2.0"
 authors = ["Interpres Contributors"]
-repository = "https://github.com/interpres/interpres"
+repository = "https://github.com/IronAdamant/Interpres"
 
 [dependencies]
 # Audio I/O - the single unavoidable external crate for real cross-platform audio in Phase 1
