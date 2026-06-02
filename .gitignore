@@ -1,0 +1,52 @@
+# Build artifacts
+/target
+/dist
+/src-tauri/target
+/src-tauri/dist
+*.exe
+*.msi
+*.dmg
+*.AppImage
+*.deb
+
+# Models (large, user-managed)
+models/
+*.onnx
+*.gguf
+*.bin
+*.pt
+*.safetensors
+!plugins/**/plugin.yaml
+
+# Python dev artifacts
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+
+# Logs & temp
+*.log
+tmp/
+temp/
+*.wav
+*.pcm
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~
+
+# Tauri
+/src-tauri/gen/
+/src-tauri/.tauri/
+/src-tauri/tauri.conf.json.bak
+
+# User data (never commit)
+*.db
+session-history/
+user-settings.toml
