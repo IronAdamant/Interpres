@@ -360,6 +360,7 @@ fn words_look_like_menu_command(s: &str) -> bool {
             | "bring"
             | "send"
             | "make"
+            | "create"
             | "add"
             | "remove"
             | "merge"
@@ -709,6 +710,7 @@ mod tests {
         "Start Dictation…",
         "Start Dictation",
         "Restore Default Position",
+        "Create Key Points",
     ];
 
     const REAL_CAPTION: &str = "The fuel is free, which sounds wonderful until you remember free fuel arrives on the weather schedule, not on yours.";
