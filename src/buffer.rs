@@ -357,6 +357,8 @@ fn words_look_like_menu_command(s: &str) -> bool {
         || ((s.ends_with('…') || s.ends_with("..."))
             && words_count(s) <= 5
             && looks_like_title_case_chrome(s.trim_end_matches(['…', '.'])))
+        // "KeyboardAccessAgent Help" style AX chrome (CamelCase process + Help).
+        || looks_like_app_help_label(s)
     {
         return true;
     }
@@ -557,6 +559,22 @@ fn score_one_caption_line(s: &str) -> i64 {
 
 fn words_count(s: &str) -> usize {
     s.split_whitespace().count()
+}
+
+/// e.g. "KeyboardAccessAgent Help" — not spoken captions.
+fn looks_like_app_help_label(s: &str) -> bool {
+    let words: Vec<&str> = s.split_whitespace().collect();
+    if words.len() != 2 {
+        return false;
+    }
+    if !words[1].eq_ignore_ascii_case("help") {
+        return false;
+    }
+    let name = words[0];
+    // CamelCase / PascalCase process or app id
+    let has_upper = name.chars().any(|c| c.is_ascii_uppercase());
+    let has_lower = name.chars().any(|c| c.is_ascii_lowercase());
+    has_upper && has_lower && name.len() >= 6
 }
 
 /// True for short menu/layout labels: mostly Capitalized, no long lowercase content words.
