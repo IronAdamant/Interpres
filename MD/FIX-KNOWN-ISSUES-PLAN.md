@@ -110,3 +110,19 @@ This is a **fix plan** for remaining work after partial mitigations. Execute in 
 ## Handoff note
 
 Partial work already in tree (junk filter expansions, on_ready, stale skip, refinement). This plan is the **checklist to close known issues** with evidence, not a greenfield rewrite.
+
+---
+
+## Implementation status (2026-08-05)
+
+| Phase | Status | Notes |
+|-------|--------|--------|
+| A | **Done in code** | Expanded junk list + `pick_caption_surface`; tests for all known chrome; never junk-only surface |
+| B | **Done in code** | `ui_labels` pure helpers; `on_ready` paint; mid-session Save OFF explicit; honesty tests |
+| C | **Done in code** | Stale skip via `should_skip_stale_surface`; clear live after N empty ticks; lag tip; multi-candidate pick |
+| D | **Done in code** | Stronger `same_or_refinement`; near-duplicate family unit tests |
+| E | **Done in code** | Labels **Live (now)** / **Session (saved lines)**; lag tip string |
+| Package | **Done** | `dist/Interpres/Interpres.app` rebuilt via `packaging/make-double-click.sh` |
+| Field re-test | **Pending user** | 2–3 min YT + LC with Debug ON on latest dist app |
+
+Zero-dep preserved (`cargo tree -p interpres` → only `interpres`).

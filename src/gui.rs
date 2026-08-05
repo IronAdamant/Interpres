@@ -4,9 +4,10 @@ use crate::buffer::same_or_refinement;
 use crate::config::Config;
 use crate::engine::{CaptureEngine, EngineEvent};
 use crate::probe;
+use crate::ui_labels::{folder_label, remember_toggle_status, session_footer};
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_void};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -23,6 +24,7 @@ struct InterpresGuiCallbacks {
     on_open_folder: Option<extern "C" fn(*mut c_void)>,
     on_check: Option<extern "C" fn(*mut c_void)>,
     on_debug: Option<extern "C" fn(*mut c_void, c_int)>,
+    on_ready: Option<extern "C" fn(*mut c_void)>,
 }
 
 #[cfg(target_os = "macos")]
@@ -72,12 +74,6 @@ fn run_macos_gui() -> i32 {
     crate::debuglog::log("gui open");
 
     let (engine, rx) = CaptureEngine::new(&cfg);
-    set_folder_label(&engine.folder());
-    set_remember_ui(engine.remember());
-    set_debug_ui(cfg.debug);
-    set_status(
-        "Turn on Live Captions (System Settings → Accessibility), then press Start listening.",
-    );
 
     let last_hist = Arc::new(Mutex::new(String::new()));
     let last_hist_pump = last_hist.clone();
@@ -94,6 +90,7 @@ fn run_macos_gui() -> i32 {
         on_open_folder: Some(cb_open_folder),
         on_check: Some(cb_check),
         on_debug: Some(cb_debug),
+        on_ready: Some(cb_ready),
     };
 
     let code = unsafe { interpres_gui_main(cbs) };
@@ -143,8 +140,18 @@ fn apply_event(ev: EngineEvent, last_hist: &Arc<Mutex<String>>) {
             }
         }
         EngineEvent::Error(s) => set_status(&format!("⚠ {s}")),
-        EngineEvent::SessionFile(Some(p)) => set_session(Some(&p.display().to_string())),
-        EngineEvent::SessionFile(None) => set_session(None),
+        EngineEvent::SessionFile(Some(p)) => {
+            set_session(Some(&p.display().to_string()));
+            // Keep folder label in sync with the file's parent directory.
+            if let Some(parent) = p.parent() {
+                set_folder_label(parent);
+            }
+            // Session file only exists when Save was ON at session start.
+            set_remember_ui(true);
+        }
+        EngineEvent::SessionFile(None) => {
+            set_session(None);
+        }
         EngineEvent::Listening(on) => set_listening(on),
     }
 }
@@ -170,8 +177,13 @@ fn append_history(s: &str) {
     unsafe { interpres_gui_append_history(c.as_ptr()) };
 }
 #[cfg(target_os = "macos")]
-fn set_folder_label(path: &std::path::Path) {
-    let c = c_string(&path.display().to_string());
+fn set_folder_label(path: &Path) {
+    // Native side prefixes "Folder: "; pass absolute path only (never empty when set).
+    let display = folder_label(path);
+    let path_only = display
+        .strip_prefix("Folder: ")
+        .unwrap_or(display.as_str());
+    let c = c_string(path_only);
     unsafe { interpres_gui_set_folder(c.as_ptr()) };
 }
 #[cfg(target_os = "macos")]
@@ -188,7 +200,16 @@ fn set_listening(on: bool) {
 }
 #[cfg(target_os = "macos")]
 fn set_session(path: Option<&str>) {
-    let c = c_string(path.unwrap_or(""));
+    // Footer via pure helper: only non-empty when a real session path is active.
+    let footer = match path {
+        Some(p) if !p.is_empty() => session_footer(Some(Path::new(p))),
+        _ => session_footer(None),
+    };
+    // Native prefixes "Saving to file: " when path non-empty; pass path only or "".
+    let path_only = footer
+        .strip_prefix("Saving to file: ")
+        .unwrap_or("");
+    let c = c_string(path_only);
     unsafe { interpres_gui_set_session_file(c.as_ptr()) };
 }
 
@@ -201,10 +222,38 @@ fn state_from(user: *mut c_void) -> Arc<Mutex<GuiState>> {
 }
 
 #[cfg(target_os = "macos")]
+extern "C" fn cb_ready(user: *mut c_void) {
+    // Window widgets now exist — push config that would have been dropped earlier.
+    let state = state_from(user);
+    let (folder, remember) = {
+        let st = state.lock().unwrap();
+        (st.engine.folder(), st.engine.remember())
+    };
+    let cfg = Config::load();
+    set_folder_label(&folder);
+    set_remember_ui(remember);
+    set_debug_ui(cfg.debug);
+    set_session(None);
+    set_status(
+        "Turn on Live Captions (System Settings → Accessibility), then press Start listening.",
+    );
+    crate::debuglog::set_folder(&folder);
+    crate::debuglog::log(&format!(
+        "ui ready folder={} remember={} debug={}",
+        folder.display(),
+        remember,
+        cfg.debug
+    ));
+}
+
+#[cfg(target_os = "macos")]
 extern "C" fn cb_start(user: *mut c_void) {
     let state = state_from(user);
     {
         let st = state.lock().unwrap();
+        // Refresh labels so folder/save match engine before listen.
+        set_folder_label(&st.engine.folder());
+        set_remember_ui(st.engine.remember());
         st.engine.start();
     }
 }
@@ -222,18 +271,14 @@ extern "C" fn cb_stop(user: *mut c_void) {
 extern "C" fn cb_remember(user: *mut c_void, value: c_int) {
     let state = state_from(user);
     let on = value != 0;
-    {
+    let folder = {
         let st = state.lock().unwrap();
         st.engine.set_remember(on);
-    }
+        st.engine.folder()
+    };
     set_remember_ui(on);
-    if on {
-        set_status(
-            "Save to disk is ON. New sessions will create a dated file in your folder.",
-        );
-    } else {
-        set_status("Save to disk is OFF. You can still watch captions live.");
-    }
+    set_folder_label(&folder);
+    set_status(&remember_toggle_status(on, &folder));
 }
 
 #[cfg(target_os = "macos")]

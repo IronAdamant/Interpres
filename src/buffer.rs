@@ -64,6 +64,15 @@ impl CaptionBuffer {
         self.committed.iter().any(|c| same_or_refinement(c, line))
     }
 
+    /// Public check: is this line (or the last line of a surface) already finalized?
+    pub fn is_covered(&self, text: &str) -> bool {
+        let last = last_line(text);
+        if last.is_empty() {
+            return false;
+        }
+        self.already_covered(&last)
+    }
+
     /// Record a final line. Never re-emits polished rewrites of an already-committed family.
     fn try_commit(&mut self, line: &str) -> Option<String> {
         let line = line.trim();
@@ -211,6 +220,29 @@ pub fn is_junk_line(s: &str) -> bool {
             | "finder"
             | "system floating window"
             | "floating window"
+            | "correct spelling automatically"
+            | "correct spelling"
+            | "capitalise words automatically"
+            | "capitalize words automatically"
+            | "add period with double-space"
+            | "smart quotes and dashes"
+            | "touch bar typing suggestions"
+            | "check spelling while typing"
+            | "correct spelling automatically."
+            | "use smart quotes and dashes"
+            | "show spelling and grammar"
+            | "force quit live captions"
+            | "force quit"
+            | "quit live captions"
+            | "return to previous size"
+            | "enter full screen"
+            | "exit full screen"
+            | "minimize"
+            | "zoom"
+            | "move"
+            | "fill"
+            | "center"
+            | "arrange"
     ) {
         return true;
     }
@@ -225,8 +257,56 @@ pub fn is_junk_line(s: &str) -> bool {
         || l.contains("screenshot")
         || l.contains("floating window")
         || l.starts_with("system ")
+        || l.contains("spelling automatically")
+        || l.contains("correct spelling")
+        || l.contains("check spelling")
+        || l.contains("auto-correct")
+        || l.contains("autocorrect")
+        || l.contains("text replacement")
+        || l.contains("smart quotes")
+        || l.contains("double-space")
+        || l.contains("force quit")
+        || l.contains("return to previous")
+        || l.contains("previous size")
+        || l.contains("full screen")
+        || l.contains("use selection")
+        || l.contains("for find")
+        || l.contains("find and replace")
+        || l.starts_with("edit ")
+        || l.starts_with("view ")
+        || l.starts_with("window ")
+        || l.starts_with("file ")
+        || (l.contains("quit") && l.contains("live captions"))
+        || (l.contains("spelling") && l.contains("grammar"))
+        || (l.contains("spelling") && l.contains("automatically"))
+        || (l.contains("capitali") && l.contains("automatically"))
     {
         return true;
+    }
+    // Short menu/button chrome: few words, no sentence punctuation, mostly Capitalized.
+    let words = t.split_whitespace().count();
+    if words >= 2
+        && words <= 5
+        && !t.contains('.')
+        && !t.contains('?')
+        && !t.contains('!')
+    {
+        let caps = t
+            .split_whitespace()
+            .filter(|w| {
+                w.chars()
+                    .next()
+                    .map(|c| c.is_ascii_uppercase())
+                    .unwrap_or(false)
+            })
+            .count();
+        // e.g. "Use Selection for Find", "Return to Previous Size"
+        if caps >= words.saturating_sub(1) {
+            return true;
+        }
+        if words <= 3 && caps >= 2 {
+            return true;
+        }
     }
     // Filename-like single tokens
     if !t.contains(' ') && (t.contains('.') || t.contains('_') || t.contains('-')) {
@@ -236,6 +316,91 @@ pub fn is_junk_line(s: &str) -> bool {
         return true;
     }
     false
+}
+
+/// Pure surface pick used by AX scrape: drop junk-only input; prefer speech-like lines.
+/// Returns `None` when every candidate is chrome/empty (never promote junk as caption).
+pub fn pick_caption_surface<'a, I>(raw: I) -> Option<String>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let mut best: Option<(i64, String)> = None;
+    for s in raw {
+        let trimmed = clean_surface(s);
+        if trimmed.is_empty() {
+            continue;
+        }
+        // clean_surface already drops junk lines; whole-string junk never scores.
+        if is_junk_line(&trimmed) {
+            continue;
+        }
+        let sc = score_caption_candidate(&trimmed);
+        if sc <= 0 {
+            continue;
+        }
+        match &best {
+            None => best = Some((sc, trimmed)),
+            Some((bsc, btxt)) => {
+                let bw = btxt.split_whitespace().count();
+                let tw = trimmed.split_whitespace().count();
+                // Prefer higher score; within 15% prefer more words (fuller live line).
+                if sc > *bsc
+                    || (sc * 100 >= *bsc * 85 && (tw > bw || (tw == bw && trimmed.len() > btxt.len())))
+                {
+                    best = Some((sc, trimmed));
+                }
+            }
+        }
+    }
+    best.map(|(_, t)| t)
+}
+
+fn score_caption_candidate(s: &str) -> i64 {
+    if is_junk_line(s) {
+        return -1_000_000;
+    }
+    let mut best_line = 0i64;
+    for line in s.lines() {
+        let t = line.trim();
+        if t.is_empty() || is_junk_line(t) {
+            continue;
+        }
+        best_line = best_line.max(score_one_caption_line(t));
+    }
+    if best_line > 0 {
+        return best_line + s.lines().count() as i64;
+    }
+    score_one_caption_line(s)
+}
+
+fn score_one_caption_line(s: &str) -> i64 {
+    if is_junk_line(s) {
+        return -1_000_000;
+    }
+    let chars = s.chars().count() as i64;
+    let words = s.split_whitespace().count() as i64;
+    let mut score = chars + words * 4;
+    if words >= 5 {
+        score += 80;
+    }
+    if words >= 10 {
+        score += 40;
+    }
+    if s.contains('.') || s.contains('?') || s.contains('!') {
+        score += 30;
+    }
+    let lower = s.to_ascii_lowercase();
+    if lower.contains(" in finder")
+        || lower.starts_with("show ")
+        || lower.contains("spelling")
+        || lower.contains("correct spelling")
+    {
+        score -= 800;
+    }
+    if words < 4 {
+        score -= 100;
+    }
+    score
 }
 
 fn looks_sentence_complete(s: &str) -> bool {
@@ -291,6 +456,7 @@ pub fn same_or_refinement(a: &str, b: &str) -> bool {
 
     // Shared leading tokens (handles "3.400" → "3.4 million" mid-sentence)
     let shorter = ta.len().min(tb.len());
+    let longer = ta.len().max(tb.len());
     let mut shared_prefix = 0usize;
     for i in 0..shorter {
         if ta[i] == tb[i] {
@@ -299,8 +465,8 @@ pub fn same_or_refinement(a: &str, b: &str) -> bool {
             break;
         }
     }
-    // First 5+ words match, or 60%+ of shorter is shared prefix
-    if shared_prefix >= 5 {
+    // First 4+ words match (ASR often rewrites the tail only)
+    if shared_prefix >= 4 {
         return true;
     }
     if shared_prefix >= 3 && (shared_prefix as f32 / shorter as f32) >= 0.55 {
@@ -312,7 +478,17 @@ pub fn same_or_refinement(a: &str, b: &str) -> bool {
     let set_b: std::collections::HashSet<&str> = tb.iter().copied().collect();
     let inter = set_a.intersection(&set_b).count();
     let union = set_a.union(&set_b).count().max(1);
-    (inter as f32 / union as f32) >= 0.78
+    let jaccard = inter as f32 / union as f32;
+    if jaccard >= 0.72 {
+        return true;
+    }
+
+    // Allow one mid-sentence token edit when most tokens still overlap
+    // (e.g. numeral spoken form vs digit form with shared frame).
+    if inter >= 5 && longer > 0 && (inter as f32 / longer as f32) >= 0.62 {
+        return true;
+    }
+    false
 }
 
 fn line_quality(s: &str) -> usize {
@@ -327,16 +503,100 @@ fn line_quality(s: &str) -> usize {
 mod tests {
     use super::*;
 
+    /// Real chrome strings from user sessions / KNOWN-ISSUES (must all be junk).
+    const KNOWN_JUNK: &[&str] = &[
+        "Correct Spelling Automatically",
+        "correct spelling automatically",
+        "Correct Spelling",
+        "Capitalise Words Automatically",
+        "Capitalize Words Automatically",
+        "Add Period with Double-Space",
+        "Smart Quotes and Dashes",
+        "Touch Bar Typing Suggestions",
+        "Check Spelling While Typing",
+        "Show Spelling and Grammar",
+        "system floating window",
+        "System Floating Window",
+        "floating window",
+        "Show “Fully-remote-115k.md” in Finder",
+        "Show \"notes.md\" in Finder",
+        "Show 'report.pdf' in Finder",
+        "AU Dual Cable Straight Bar Research.md",
+        "live captions",
+        "Live Captions",
+        "Computer Audio",
+        "Type to Speak",
+        "auto-correct",
+        "Text Replacement",
+        "Force Quit Live Captions",
+        "Force Quit",
+        "Quit Live Captions",
+        "Return to Previous Size",
+        "Enter Full Screen",
+        "Exit Full Screen",
+        "Use Selection for Find",
+        "Find and Replace",
+    ];
+
+    const REAL_CAPTION: &str = "The fuel is free, which sounds wonderful until you remember free fuel arrives on the weather schedule, not on yours.";
+
     #[test]
-    fn junk_finder_and_md() {
-        assert!(is_junk_line(
-            "Show “Fully-remote-115k.md” in Finder"
-        ));
-        assert!(is_junk_line("AU Dual Cable Straight Bar Research.md"));
-        assert!(is_junk_line("system floating window"));
+    fn all_known_chrome_is_junk() {
+        for s in KNOWN_JUNK {
+            assert!(is_junk_line(s), "expected junk: {s:?}");
+        }
+    }
+
+    #[test]
+    fn real_captions_are_not_junk() {
+        assert!(!is_junk_line(REAL_CAPTION));
         assert!(!is_junk_line(
-            "The fuel is free, which sounds wonderful until you remember free fuel arrives on the weather schedule, not on yours."
+            "Last year, California threw away roughly 3.4 million megawatt hours of clean electricity."
         ));
+        assert!(!is_junk_line("Hello how are you doing today my friend"));
+    }
+
+    #[test]
+    fn junk_only_surface_never_picked() {
+        let only_junk = [
+            "Correct Spelling Automatically",
+            "system floating window",
+            "Show “x.md” in Finder",
+        ];
+        assert_eq!(
+            pick_caption_surface(only_junk.iter().copied()),
+            None,
+            "junk-only AX must not become caption surface"
+        );
+    }
+
+    #[test]
+    fn junk_mixed_with_caption_prefers_caption() {
+        let mixed = [
+            "Correct Spelling Automatically",
+            REAL_CAPTION,
+            "system floating window",
+        ];
+        let picked = pick_caption_surface(mixed.iter().copied()).expect("caption");
+        assert!(picked.contains("fuel is free"), "got {picked:?}");
+        assert!(!picked.to_ascii_lowercase().contains("spelling"));
+    }
+
+    #[test]
+    fn junk_only_observe_never_emits_final() {
+        let mut b = CaptionBuffer::new();
+        for _ in 0..5 {
+            match b.observe("Correct Spelling Automatically") {
+                BufferEmit::Final(_) | BufferEmit::Finals(_) => {
+                    panic!("must not finalize chrome")
+                }
+                BufferEmit::Partial(t) => {
+                    assert!(!t.to_ascii_lowercase().contains("spelling"), "{t}");
+                }
+                BufferEmit::None => {}
+            }
+        }
+        assert!(b.committed.is_empty());
     }
 
     #[test]
@@ -371,6 +631,54 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn near_duplicate_family_one_final_in_history() {
+        // Real transcript-style draft → polish pairs (numeral rewrite + tiny wording).
+        let pairs = [
+            (
+                "Last year, California threw away roughly 3.400 megawatt hours of clean",
+                "Last year, California threw away roughly 3.4 million megawatt hours of clean electricity.",
+            ),
+            (
+                "They said it would take about 2.500 hours of work on the grid",
+                "They said it would take about 2.5 thousand hours of work on the grid.",
+            ),
+            (
+                "Wind turbines produce power when the weather cooperates with demand",
+                "Wind turbines produce power when the weather cooperates with the grid demand.",
+            ),
+        ];
+        for (draft, polished) in pairs {
+            assert!(
+                same_or_refinement(draft, polished),
+                "family match failed:\n  {draft}\n  {polished}"
+            );
+            let mut b = CaptionBuffer::new();
+            b.stable_needed = 1;
+            let _ = b.observe(draft);
+            let _ = b.observe(draft); // force final draft if any
+            let _ = b.observe(polished);
+            let _ = b.observe(polished);
+            let family = b
+                .committed
+                .iter()
+                .filter(|c| same_or_refinement(c, polished) || same_or_refinement(c, draft))
+                .count();
+            assert_eq!(family, 1, "committed={:?}", b.committed);
+        }
+    }
+
+    #[test]
+    fn is_covered_after_final() {
+        let mut b = CaptionBuffer::new();
+        b.stable_needed = 1;
+        let line = "Wind power works when the weather cooperates with the grid.";
+        let _ = b.observe(line);
+        let _ = b.observe(line);
+        assert!(b.is_covered(line));
+        assert!(b.is_covered(&format!("{line}\n{line}")));
     }
 
     #[test]

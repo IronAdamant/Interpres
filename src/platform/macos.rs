@@ -136,29 +136,6 @@ fn push_text(s: String, out: &mut Vec<String>) {
     out.push(t);
 }
 
-/// Score caption-like surfaces higher than random UI strings.
-fn score_surface(s: &str) -> i64 {
-    if crate::buffer::is_junk_line(s) {
-        return -1_000_000;
-    }
-    let chars = s.chars().count() as i64;
-    let words = s.split_whitespace().count() as i64;
-    let lines = s.lines().filter(|l| !l.trim().is_empty()).count() as i64;
-    let mut score = chars + words * 3 + lines * 20;
-    // Prefer multi-word speech
-    if words >= 5 {
-        score += 50;
-    }
-    if s.contains('.') || s.contains('?') || s.contains('!') {
-        score += 30;
-    }
-    let lower = s.to_ascii_lowercase();
-    if lower.contains(" in finder") || lower.starts_with("show ") {
-        score -= 500;
-    }
-    score
-}
-
 fn collect_strings(element: *const c_void, depth: u32, out: &mut Vec<String>) {
     if element.is_null() || depth > 16 {
         return;
@@ -358,16 +335,14 @@ pub fn poll_text(presence: LiveCaptionsPresence) -> CaptureSnapshot {
     }
     unsafe { CFRelease(app) };
 
-    // Prefer speech-like surfaces; then keep only the live edge (last few lines).
-    let surface = strings
-        .into_iter()
-        .filter(|s| score_surface(s) > 0)
-        .max_by_key(|s| score_surface(s))
-        .map(|s| trim_to_live_edge(&s));
+    // Rank non-junk candidates; pure picker never returns junk-only surfaces.
+    let candidate_count = strings.len();
+    let surface = crate::buffer::pick_caption_surface(strings.iter().map(|s| s.as_str()));
 
     crate::debuglog::log(&format!(
-        "macos poll pid={pid} surface_chars={} detail={}",
+        "macos poll pid={pid} surface_chars={} candidates={} detail={}",
         surface.as_ref().map(|s| s.chars().count()).unwrap_or(0),
+        candidate_count,
         presence.detail
     ));
 
@@ -396,24 +371,6 @@ pub fn poll_text(presence: LiveCaptionsPresence) -> CaptureSnapshot {
         surface_text: surface,
         error: None,
     }
-}
-
-/// Keep last 1–3 caption lines so UI tracks the live edge, not a multi-minute sticky block.
-fn trim_to_live_edge(s: &str) -> String {
-    let lines: Vec<&str> = s
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !crate::buffer::is_junk_line(l))
-        .collect();
-    if lines.is_empty() {
-        return String::new();
-    }
-    // Single long paragraph without newlines: take as-is (Live Captions often one block).
-    if lines.len() == 1 {
-        return lines[0].to_string();
-    }
-    let start = lines.len().saturating_sub(3);
-    lines[start..].join("\n")
 }
 
 /// Extra diagnostics for `interpres diagnose`.

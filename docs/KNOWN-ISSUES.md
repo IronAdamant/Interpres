@@ -3,7 +3,9 @@
 **Last updated:** 2026-08-05  
 **Evidence:** Real YouTube + Live Captions sessions, `*.txt` / `*.debug.log` under Documents/Interpres Transcripts, phone photos, and AgentVideoParse frame packs (e.g. `~/Movies/AgentVideoParse/IMG_6490-…`).
 
-These are **confirmed product issues**, not guesses. Some mitigations landed in code already; items stay here until a clean re-test on the latest build closes them.
+These were **confirmed product issues**. Mitigations for items 1–5 landed in code with unit tests; items stay annotated until a clean user re-test on the latest `dist/Interpres.app` fully closes them in the field.
+
+**Fix plan:** [MD/FIX-KNOWN-ISSUES-PLAN.md](../MD/FIX-KNOWN-ISSUES-PLAN.md)
 
 ---
 
@@ -15,11 +17,11 @@ These are **confirmed product issues**, not guesses. Some mitigations landed in 
 
 - `Correct Spelling Automatically`
 - Finder / document titles (e.g. `Show "….md" in Finder`)
-- Other short UI labels
+- Other short UI labels (`Force Quit Live Captions`, floating window chrome)
 
 **Why:** Accessibility scrape of Live Captions can also see system/app chrome; filters were incomplete.
 
-**Status:** Filters expanded (spelling, Finder, floating window, etc.). **Re-test required** on latest `dist/Interpres.app`.
+**Status:** **Closed in code (2026-08-05)** — expanded `is_junk_line`, `pick_caption_surface` never returns junk-only surfaces, unit tests cover all listed chrome + non-junk captions. **User re-test** on latest `dist/Interpres.app` recommended to confirm in a live YT session.
 
 ---
 
@@ -32,7 +34,7 @@ These are **confirmed product issues**, not guesses. Some mitigations landed in 
 
 **Why:** UI labels were sometimes applied **before** the native window existed (updates dropped), and mid-session Save toggle did not clearly describe “current session vs next session.”
 
-**Status:** `on_ready` re-applies folder/save/debug; session-file events refresh folder label. **Re-test required.**
+**Status:** **Closed in code (2026-08-05)** — `on_ready` re-applies folder/save/debug; pure `ui_labels` helpers for footer/status; Save OFF mid-session status is explicit; new session with Save OFF cannot show a saving footer (unit-tested). **User re-test** on cold launch + Save toggle still recommended.
 
 ---
 
@@ -46,7 +48,7 @@ These are **confirmed product issues**, not guesses. Some mitigations landed in 
 - Poll + “stable before FINAL” logic adds delay
 - After FINAL, stuck surface re-processed until filters/skip logic improved
 
-**Status:** Faster poll floor, stale-surface skip when already finalized, live-edge surface preference. **Re-test required** with Debug ON + AgentVideoParse frames.
+**Status:** **Closed in code (2026-08-05)** — stale-surface skip when already covered, clear live after N empty/junk ticks, live-edge multi-candidate pick, lag tip after long stale runs. **User re-test** with Debug ON + short clip still recommended.
 
 ---
 
@@ -56,7 +58,7 @@ These are **confirmed product issues**, not guesses. Some mitigations landed in 
 
 **Why:** Draft and polished forms both treated as FINAL before stronger “same family” matching.
 
-**Status:** Dedup / refinement logic improved. **Re-test required.**
+**Status:** **Closed in code (2026-08-05)** — strengthened `same_or_refinement` (prefix + Jaccard + mid-token overlap); buffer commits one family line; unit tests drive real near-duplicate pairs. **User re-test** on multi-minute session recommended.
 
 ---
 
@@ -66,7 +68,7 @@ These are **confirmed product issues**, not guesses. Some mitigations landed in 
 
 **Why:** By design, FINAL updates live **and** appends history (with refinement skip for true rewrites).
 
-**Status:** Partial — history skips same/refinement of last line; live still shows current text. May need clearer UI copy (“live = now, session = saved lines”) rather than only code.
+**Status:** **Closed in code (2026-08-05)** — UI labels **Live (now)** vs **Session (saved lines)**; history still skips same-family rewrites. Copy polish only; behavior is intentional.
 
 ---
 
@@ -77,6 +79,8 @@ These are **confirmed product issues**, not guesses. Some mitigations landed in 
 **Why:** Apple privacy behavior — not an Interpres bug.
 
 **Workaround:** Phone photo of the screen, or AgentVideoParse frames of a short recording; trust Interpres live box + debug log for what we scraped.
+
+**Status:** **Out of scope** (Apple platform limitation).
 
 ---
 
@@ -100,4 +104,4 @@ These are **confirmed product issues**, not guesses. Some mitigations landed in 
 
 ## Fix tracking
 
-See **[MD/FIX-KNOWN-ISSUES-PLAN.md](../MD/FIX-KNOWN-ISSUES-PLAN.md)** for the ordered fix plan.
+See **[MD/FIX-KNOWN-ISSUES-PLAN.md](../MD/FIX-KNOWN-ISSUES-PLAN.md)** for the ordered fix plan (phases A–E implemented 2026-08-05).

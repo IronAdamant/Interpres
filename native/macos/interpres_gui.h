@@ -18,6 +18,7 @@ typedef struct InterpresGuiCallbacks {
     interpres_fn on_open_folder;
     interpres_fn on_check;
     interpres_int_fn on_debug; /* 1 = debug on, 0 = off */
+    interpres_fn on_ready;     /* window created — re-push folder/save labels */
 } InterpresGuiCallbacks;
 
 int interpres_gui_main(InterpresGuiCallbacks callbacks);

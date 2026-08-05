@@ -142,16 +142,16 @@ static NSScrollView *makeScrollText(NSRect frame, NSTextView **outView, CGFloat 
     [g_status setTextColor:mutedColor()];
     [content addSubview:g_status];
 
-    /* Live line */
-    [content addSubview:makeLabel(@"Live captions", NSMakeRect(24, h - 320, 200, 20), 13, YES)];
+    /* Live line — current partial/final only (not the saved list) */
+    [content addSubview:makeLabel(@"Live (now)", NSMakeRect(24, h - 320, 280, 20), 13, YES)];
     NSTextView *liveLocal = nil;
     NSScrollView *liveScroll =
         makeScrollText(NSMakeRect(24, h - 430, w - 48, 100), &liveLocal, 22.0);
     g_live = liveLocal;
     [content addSubview:liveScroll];
 
-    /* History */
-    [content addSubview:makeLabel(@"This session", NSMakeRect(24, h - 460, 200, 20), 13, YES)];
+    /* History — FINAL lines saved this session (may match live when a line settles) */
+    [content addSubview:makeLabel(@"Session (saved lines)", NSMakeRect(24, h - 460, 320, 20), 13, YES)];
     NSTextView *histLocal = nil;
     NSScrollView *histScroll =
         makeScrollText(NSMakeRect(24, 70, w - 48, h - 540), &histLocal, 16.0);
@@ -159,7 +159,7 @@ static NSScrollView *makeScrollText(NSRect frame, NSTextView **outView, CGFloat 
     [histScroll setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
     [content addSubview:histScroll];
     /* Folder + session path */
-    g_folder = makeLabel(@"Folder: (not set)", NSMakeRect(24, 36, w - 48, 22), 13, NO);
+    g_folder = makeLabel(@"Folder: …", NSMakeRect(24, 36, w - 48, 22), 13, NO);
     [g_folder setTextColor:mutedColor()];
     [content addSubview:g_folder];
     g_session = makeLabel(@"", NSMakeRect(24, 12, w - 48, 22), 12, NO);
@@ -168,6 +168,10 @@ static NSScrollView *makeScrollText(NSRect frame, NSTextView **outView, CGFloat 
 
     [g_window makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
+
+    /* Tell Rust the window exists so folder/save labels can be applied (not dropped). */
+    if (g_cbs.on_ready)
+        g_cbs.on_ready(g_cbs.user);
 }
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender {
