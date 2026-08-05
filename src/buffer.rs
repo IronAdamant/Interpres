@@ -300,9 +300,9 @@ pub fn is_junk_line(s: &str) -> bool {
     {
         return true;
     }
-    // Short imperative / menu-bar commands (not spoken captions).
-    // Uses first-word verbs so "President Biden said" / "New York Times" stay speech.
-    if words_look_like_menu_command(&l) {
+    // Short menu-bar commands only (not free speech that happens to start with open/help/save).
+    // Pass original casing so Title-Case UI labels can be distinguished from speech.
+    if words_look_like_menu_command(t) {
         return true;
     }
     // Filename-like single tokens (not spoken captions).
@@ -315,18 +315,39 @@ pub fn is_junk_line(s: &str) -> bool {
     false
 }
 
-/// Edit/Window/app menu commands: short lines starting with a UI verb.
-fn words_look_like_menu_command(lower: &str) -> bool {
+/// Edit/Window/app menu commands — not free speech that starts with the same verbs.
+///
+/// "Open the door" / "Help me understand this" / "Save our jobs at the plant" are speech
+/// (lowercase content words). "Paste and Match Style" / "Select All" / "Open File" are chrome.
+fn words_look_like_menu_command(s: &str) -> bool {
+    let lower = s.to_ascii_lowercase();
     let words: Vec<&str> = lower.split_whitespace().collect();
     if words.is_empty() || words.len() > 6 {
         return false;
     }
-    // No sentence punctuation → more likely a menu label than a caption.
+    // Explicit multi-word chrome (always junk regardless of casing).
+    if lower.contains("match style")
+        || lower.contains("dictation")
+        || lower.contains("emoji")
+        || lower.contains("special character")
+        || lower.contains("default position")
+        || lower.contains("default size")
+        || lower.contains("to selection")
+        || lower.ends_with(" selection")
+        || lower.contains("left to right")
+        || lower.contains("right to left")
+        || lower.contains("force quit")
+        || lower.contains("full screen")
+        || lower.contains("previous size")
+    {
+        return true;
+    }
+    // Sentence punctuation → spoken line, not a menu label.
     if lower.contains('.') || lower.contains('?') || lower.contains('!') {
         return false;
     }
     let first = words[0];
-    matches!(
+    let is_menu_verb = matches!(
         first,
         "paste"
             | "copy"
@@ -397,18 +418,28 @@ fn words_look_like_menu_command(lower: &str) -> bool {
             | "jump"
             | "scroll"
             | "navigate"
-    ) || lower.contains("match style")
-        || lower.contains("dictation")
-        || lower.contains("emoji")
-        || lower.contains("special character")
-        || lower.contains("default position")
-        || lower.contains("default size")
-        || lower.contains("to selection")
-        || lower.ends_with(" selection")
-        || lower == "left to right"
-        || lower == "right to left"
-        || lower.contains("left to right")
-        || lower.contains("right to left")
+    );
+    if !is_menu_verb {
+        return false;
+    }
+    // Long lowercase content words after the verb ⇒ spoken sentence, not a menu label.
+    // e.g. "Open the door", "Help me understand this", "Check your email when you can".
+    if has_long_lowercase_content(s) {
+        return false;
+    }
+    // 1–2 token menu items ("Copy", "Select All", "Open File") or Title-Case menu phrases.
+    words.len() <= 2 || looks_like_title_case_chrome(s)
+}
+
+/// True when a token is lowercase and length ≥ 4 (speech glue: said, door, email, …).
+fn has_long_lowercase_content(s: &str) -> bool {
+    s.split_whitespace().any(|w| {
+        w.chars()
+            .next()
+            .map(|c| c.is_ascii_lowercase())
+            .unwrap_or(false)
+            && w.chars().count() >= 4
+    })
 }
 
 /// Pure surface pick used by AX scrape: drop junk-only input; prefer speech-like lines.
@@ -483,25 +514,22 @@ fn score_one_caption_line(s: &str) -> i64 {
         score += 30;
     }
     let lower = s.to_ascii_lowercase();
+    // Only penalize Finder/spelling chrome — not ordinary speech starting with "show ".
     if lower.contains(" in finder")
-        || lower.starts_with("show ")
         || lower.contains("spelling")
         || lower.contains("correct spelling")
     {
         score -= 800;
     }
-    // Mild penalty for very short lines — do not drop 3-word speech partials
-    // ("President Biden said") which must remain pickable when they are the live edge.
+    // Mild penalty for very short lines — keep 3-word speech partials pickable
+    // ("President Biden said", "New York Times", "Good Morning America").
     if words < 2 {
         score -= 100;
     } else if words < 3 {
         score -= 30;
     }
-    // Short Title-Case / layout chrome ("Restore Default Position", "Left to Right").
-    // Mixed-case speech with a lowercase content word ("President Biden said") is fine.
-    if words <= 5 && looks_like_title_case_chrome(s) {
-        score -= 250;
-    }
+    // Do **not** score-down all Title-Case short phrases: proper-noun live edges
+    // ("New York Times") must remain pickable. Menu Title-Case is already is_junk_line.
     score
 }
 
@@ -718,14 +746,13 @@ mod tests {
                 !is_junk_line(s),
                 "short speech must pass junk filter: {s:?}"
             );
+            // Sole live-edge partials must remain pickable (not score-killed).
+            assert!(
+                pick_caption_surface(std::iter::once(*s)).is_some(),
+                "pick_caption_surface must keep real partial: {s:?}"
+            );
         }
-        // Mixed-case speech partials must remain pickable as the sole surface.
-        let mixed = "President Biden said";
-        assert!(
-            pick_caption_surface(std::iter::once(mixed)).is_some(),
-            "mixed-case speech partial must be pickable"
-        );
-        // All-Title-Case menu chrome must not win as caption surface.
+        // Menu chrome must not win as caption surface.
         assert_eq!(
             pick_caption_surface(std::iter::once("Restore Default Position")),
             None
@@ -734,6 +761,34 @@ mod tests {
             pick_caption_surface(std::iter::once("Paste and Match Style")),
             None
         );
+    }
+
+    /// Imperative speech that shares a first word with menu verbs must stay speech.
+    #[test]
+    fn imperative_speech_not_menu_junk() {
+        const SPEECH: &[&str] = &[
+            "Open the door",
+            "Help me understand this",
+            "Check your email when you can",
+            "Save our jobs at the plant",
+            "Show me the way home",
+            "Start the meeting after lunch",
+            "Close your eyes and listen carefully",
+        ];
+        for s in SPEECH {
+            assert!(
+                !is_junk_line(s),
+                "imperative speech must not be menu junk: {s:?}"
+            );
+            assert!(
+                pick_caption_surface(std::iter::once(*s)).is_some(),
+                "imperative speech must be pickable: {s:?}"
+            );
+        }
+        // True 1–2 word menu items still junk.
+        assert!(is_junk_line("Copy"));
+        assert!(is_junk_line("Select All"));
+        assert!(is_junk_line("Open File"));
     }
 
     #[test]
