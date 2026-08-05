@@ -3,6 +3,7 @@
 //! Strict zero third-party crates (crates.io). Platform UI/scrape via system
 //! frameworks + hand-written FFI / native clang objects.
 
+pub mod assets_check;
 pub mod buffer;
 pub mod config;
 pub mod debuglog;

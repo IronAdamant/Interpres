@@ -81,6 +81,14 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$DIST/interpres" "$APP/Contents/Resources/interpres"
 chmod +x "$APP/Contents/Resources/interpres"
 cp -R "$DIST/helpers" "$APP/Contents/Resources/helpers" 2>/dev/null || true
+# App icon (zero crates — prebuilt .icns from assets/)
+if [ -f "$ROOT/assets/Interpres.icns" ]; then
+  cp "$ROOT/assets/Interpres.icns" "$APP/Contents/Resources/Interpres.icns"
+fi
+if [ -f "$ROOT/assets/logo.png" ]; then
+  cp "$ROOT/assets/logo.png" "$APP/Contents/Resources/logo.png"
+  cp "$ROOT/assets/logo.png" "$DIST/logo.png"
+fi
 
 # Launcher: run the real binary (native AppKit window — no Terminal, no webpage)
 cat > "$APP/Contents/MacOS/Interpres" << 'EOF'
@@ -109,6 +117,8 @@ cat > "$APP/Contents/Info.plist" << 'EOF'
   <key>CFBundleShortVersionString</key>
   <string>0.2.0</string>
   <key>CFBundleExecutable</key>
+  <string>Interpres</string>
+  <key>CFBundleIconFile</key>
   <string>Interpres</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>

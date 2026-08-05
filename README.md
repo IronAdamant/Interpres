@@ -1,5 +1,9 @@
 # Interpres
 
+<p align="center">
+  <img src="assets/logo-256.png" alt="Interpres logo — caption lines and live sound waves" width="128" height="128" />
+</p>
+
 **Save what Live Captions say — so you can read it again later.**
 
 Interpres is a free, open-source helper for **Deaf and hard of hearing** people on **Windows** and **Mac**. It does not replace your captions. It works **with** the Live Captions your computer already has.
