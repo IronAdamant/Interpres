@@ -347,7 +347,16 @@ fn words_look_like_menu_command(s: &str) -> bool {
         || lower.contains("right &")
         || lower.contains("on screen")
         || lower.contains("on top")
+        || lower.contains("log out")
+        || lower.contains("log off")
+        || lower.starts_with("sign out")
+        || lower.starts_with("sign in")
+        || lower.starts_with("lock screen")
         || (s.contains('&') && looks_like_title_case_chrome(s))
+        // Short Title-Case labels ending in ellipsis are almost always menus.
+        || ((s.ends_with('…') || s.ends_with("..."))
+            && words_count(s) <= 5
+            && looks_like_title_case_chrome(s.trim_end_matches(['…', '.'])))
     {
         return true;
     }
@@ -546,9 +555,18 @@ fn score_one_caption_line(s: &str) -> i64 {
     score
 }
 
+fn words_count(s: &str) -> usize {
+    s.split_whitespace().count()
+}
+
 /// True for short menu/layout labels: mostly Capitalized, no long lowercase content words.
 fn looks_like_title_case_chrome(s: &str) -> bool {
-    if s.contains('.') || s.contains('?') || s.contains('!') {
+    let s = s.trim().trim_end_matches(['…', '.']);
+    if s.contains('?') || s.contains('!') {
+        return false;
+    }
+    // Allow a single trailing period only if not a multi-sentence line.
+    if s.matches('.').count() > 0 {
         return false;
     }
     let words: Vec<&str> = s.split_whitespace().collect();
