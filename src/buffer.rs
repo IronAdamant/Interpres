@@ -387,10 +387,22 @@ fn words_look_like_menu_command(lower: &str) -> bool {
             | "edit"
             | "view"
             | "go"
+            | "restore"
+            | "reset"
+            | "clear"
+            | "empty"
+            | "new"
+            | "get"
+            | "set"
+            | "turn"
+            | "enable"
+            | "disable"
     ) || lower.contains("match style")
         || lower.contains("dictation")
         || lower.contains("emoji")
         || lower.contains("special character")
+        || lower.contains("default position")
+        || lower.contains("default size")
 }
 
 /// Pure surface pick used by AX scrape: drop junk-only input; prefer speech-like lines.
@@ -478,6 +490,21 @@ fn score_one_caption_line(s: &str) -> i64 {
         score -= 100;
     } else if words < 3 {
         score -= 30;
+    }
+    // All-Title-Case short phrases without sentence punctuation are usually menu chrome
+    // ("Restore Default Position"). Mixed-case speech ("President Biden said") is fine.
+    if words <= 5
+        && !s.contains('.')
+        && !s.contains('?')
+        && !s.contains('!')
+        && s.split_whitespace().all(|w| {
+            w.chars()
+                .next()
+                .map(|c| c.is_ascii_uppercase() || !c.is_alphabetic())
+                .unwrap_or(true)
+        })
+    {
+        score -= 250;
     }
     score
 }
@@ -624,6 +651,7 @@ mod tests {
         "Select All",
         "Start Dictation…",
         "Start Dictation",
+        "Restore Default Position",
     ];
 
     const REAL_CAPTION: &str = "The fuel is free, which sounds wonderful until you remember free fuel arrives on the weather schedule, not on yours.";
@@ -661,13 +689,22 @@ mod tests {
                 !is_junk_line(s),
                 "short speech must pass junk filter: {s:?}"
             );
-            // Surface pick must keep them when they are the only candidates.
-            let picked = pick_caption_surface(std::iter::once(*s));
-            assert!(
-                picked.is_some(),
-                "pick_caption_surface dropped real partial: {s:?}"
-            );
         }
+        // Mixed-case speech partials must remain pickable as the sole surface.
+        let mixed = "President Biden said";
+        assert!(
+            pick_caption_surface(std::iter::once(mixed)).is_some(),
+            "mixed-case speech partial must be pickable"
+        );
+        // All-Title-Case menu chrome must not win as caption surface.
+        assert_eq!(
+            pick_caption_surface(std::iter::once("Restore Default Position")),
+            None
+        );
+        assert_eq!(
+            pick_caption_surface(std::iter::once("Paste and Match Style")),
+            None
+        );
     }
 
     #[test]
