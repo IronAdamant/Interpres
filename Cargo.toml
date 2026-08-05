@@ -1,49 +1,24 @@
 [package]
 name = "interpres"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "Privacy-first local AI communication appliance (zero-dependency core)"
+description = "Local companion that saves Windows and macOS Live Captions as dated session transcripts"
 license = "MIT OR Apache-2.0"
 authors = ["Interpres Contributors"]
 repository = "https://github.com/IronAdamant/Interpres"
+readme = "README.md"
+keywords = ["live-captions", "accessibility", "deaf", "transcript", "offline"]
+categories = ["accessibility", "command-line-utilities"]
 
+# Strict zero-dependency: no crates.io packages in the shipping core.
 [dependencies]
-# Audio I/O - the single unavoidable external crate for real cross-platform audio in Phase 1
-cpal = "0.15"
 
-# GUI layer (the single allowed framework exception for excellent high-contrast UX)
-# Latest stable pair as of 2026-05 (0.34 series released together and work excellently)
-egui = { version = "0.34", optional = true }
-eframe = { version = "0.34", optional = true }
+[dev-dependencies]
 
-# We are deliberately keeping the dependency count extremely low.
-# All other functionality (plugin protocol, VAD, state, HTTP server, etc.) is implemented in pure std.
-# egui/eframe is the pragmatic single exception for the UI layer (per ZERO-DEP-PLAN).
-
-[features]
-default = []
-# Enable with: cargo run --features gui
-# This pulls in the egui + eframe GUI (the only allowed non-zero-dep exception).
-gui = ["dep:egui", "dep:eframe"]
-
-# Debug/test feature for producing easy standalone test .exe (especially Windows cross-build).
-# When enabled:
-# - Verbose logging is forced on.
-# - *Everything* (plugin traffic, engine events, errors, panics, startup info) is also
-#   appended to `interpres-test-debug.log.txt` placed next to the .exe (super easy to find
-#   and zip for investigation; no install, just run the exe and look beside it).
-# Recommended for your test .exe:
-#   cross build --target x86_64-pc-windows-gnu --features "gui,debug-logs" --release
-# Or for debug symbols:
-#   cross build --target x86_64-pc-windows-gnu --features "gui,debug-logs"
-debug-logs = []
+[lib]
+name = "interpres"
+path = "src/lib.rs"
 
 [[bin]]
 name = "interpres"
 path = "src/main.rs"
-
-[profile.release]
-lto = true
-strip = true
-opt-level = "z"   # Optimize for size (important for appliance feel)
-codegen-units = 1

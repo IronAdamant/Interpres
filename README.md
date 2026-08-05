@@ -1,135 +1,146 @@
-# Interpres — Privacy-First Local AI Communication Appliance
+# Interpres
 
-**For Deaf and Hard of Hearing users. 100% local. No cloud. No human operators.**
+**Save what Live Captions say — so you can read it again later.**
 
-Interpres is a fully on-device AI relay that helps with sensitive calls (banking, medical, legal, personal) using real-time transcription and three reply modes — all on your machine.
+Interpres is a free, open-source helper for **Deaf and hard of hearing** people on **Windows** and **Mac**. It does not replace your captions. It works **with** the Live Captions your computer already has.
 
-## Core Promise (Non-Negotiables)
+This project was **rebuilt from the ground up**. After real meetings, interviews, and everyday conversations, it became clear that **Windows Live Captions** and **macOS Live Captions** already work well for *reading* speech live. What was missing was a simple, local way to **keep a transcript** — one file per session, with the date and time — so you can remember what was said.
 
-- **100% local** — No STT, TTS, LLM, or audio leaves your device in production.
-- **No audio retention** unless you explicitly opt in.
-- **Deaf/HoH first** — Large high-contrast text, minimal clicks, big obvious controls.
-- **Simple for non-technical users** — One installer (planned), model setup guide, drag-and-drop plugins.
-- **Open source core** (MIT/Apache-2.0).
-- English primary in the free tier.
+No subscription. No cloud account. No paid product. Public open source for anyone to use or fork.
 
-## Three Reply Modes (Per Session)
+---
 
-| Mode | Description | What the other party hears |
-|------|-------------|----------------------------|
-| **Trusted Calls** | Live subtitles; you speak in your own voice. | Your real voice |
-| **Voice Protection** | Subtitles + voice changer (stub labels in v1). | Changed voice (full changer planned) |
-| **AI on My Behalf** | You type; TTS speaks with required announcement prefix. | "This is an AI speaking on behalf of …" |
+## What it does
 
-## Two Ways to See Subtitles
+| You already have | Interpres adds |
+|------------------|----------------|
+| Live Captions on screen | Optional **saved transcript** |
+| Great for the moment | Great for **later** (notes, follow-up, “what did they say?”) |
 
-1. **Laptop — floating always-on-top window** (recommended)  
-   `cargo run --features gui` — giant high-contrast subtitles stay on top of Zoom, Teams, browsers.
+- Works with **Windows 11 Live Captions** and **Mac Live Captions**
+- **You choose the folder** for transcripts (it remembers that folder)
+- **One new file per session**, named with **date and time** (for example `2026-08-05_14-22-01.txt`)
+- Saving is **off until you turn it on** (your privacy, your choice)
+- Everything stays **on your computer**
 
-2. **Phone / tablet — thin client**  
-   Open `http://<your-pc-ip>:43123/` on the same Wi‑Fi (pure HTTP+SSE, no install).
+---
 
-## Current Status (2026)
+## Easy start (non-technical) — double-click, no terminal
 
-**Working today (zero-dep core + optional GUI):**
+You do **not** need the command line for day-to-day use.
 
-- Real microphone capture + VAD + utterance pipeline (`cpal` only mandatory crate)
-- Python dev transcriber plugin (or demo mode without faster-whisper)
-- Pure-std HTTP+SSE thin-client server
-- Native GUI: control panel + **always-on-top** subtitle overlay (`--overlay` mode)
-- AI-on-behalf composer + dev TTS stub
-- Settings persistence (`~/.config/interpres/settings.conf`)
-- Easy standalone Windows test .exe via `packaging/windows-build.ps1` (includes `--features "gui,debug-logs"` with full local logging to `interpres-test-debug.log.txt` next to the exe)
+### Build a clickable app folder (once, on this computer)
 
-**Not production-certified for critical calls yet** — complete QA on your OS after Phase 5.
+Someone technical (or you, once) runs:
 
-## Quick Start (from source)
-
-```bash
-# Prerequisites: Rust 1.80+, Python 3 for dev plugins
-git clone <repo> && cd interpres
-
-# Headless (console + phone subtitles)
-cargo run
-
-# Laptop GUI + floating subtitles
-cargo run --features gui
-
-# Pure floating subtitles only (giant text, almost no UI surface; one window)
-cargo run --features gui -- --subtitles-only  # or --pure / --floating-only / --overlay (alias)
+```text
+./packaging/make-double-click.sh
 ```
 
-For a ready-to-run Windows .exe (with debug logs to .txt beside it for test investigation):
+That creates **`dist/Interpres/`** with:
 
-```powershell
-powershell -File packaging\windows-build.ps1
+| Double-click this | What it does |
+|-------------------|--------------|
+| **Interpres.app** (Mac) | Opens Terminal and starts Interpres |
+| **Open Interpres.command** (Mac) | Same idea without a full .app |
+| **Open Interpres.bat** (Windows) | After you place `interpres.exe` in the folder |
+| **Try demo…** | Sample transcript — no Live Captions needed |
+| **Turn saving ON** | Start saving sessions to disk |
+| **START HERE.txt** | Short plain-language guide |
+
+Open the folder:
+
+```text
+open dist/Interpres
 ```
 
-See **[BUILD.md](BUILD.md)** for platform audio routing (VB-CABLE, BlackHole, PipeWire).
+Then **double-click `Interpres.app`** (or `Open Interpres.command`).  
+First time on a Mac: if Gatekeeper blocks it, **right-click → Open**.
 
-Models: run `./tools/setup_models.sh` for download paths.
+A zip is also made: `dist/Interpres-portable-macos.zip` — you can copy that folder to another Mac of the same kind (Apple silicon vs Intel must match the build).
 
-## Building an Easy Standalone Test .exe (with Full Debug Logging)
+### 1. Turn on Live Captions
 
-For laptop testing (no install, just copy and run the .exe):
+**Windows 11**
 
-On Windows (with `rustup` + Python 3 on PATH):
+- Press **Win + Ctrl + L**, or  
+- Settings → Accessibility → Captions → **Live captions**
 
-```powershell
-powershell -File packaging\windows-build.ps1
+**Mac**
+
+- System Settings → Accessibility → **Live Captions** → turn on  
+- If capture is empty: System Settings → Privacy & Security → **Accessibility** → allow **Interpres** and/or **Terminal**
+
+### 2. Start Interpres
+
+- **Preferred:** double-click **Interpres.app** or **Open Interpres.command** in `dist/Interpres`  
+- **Windows:** double-click **Open Interpres.bat** (with `interpres.exe` in the same folder)
+
+### 3. Saving (optional)
+
+Double-click **Turn saving ON.command**, or on Windows run `interpres.exe remember on`.  
+Files go under **Documents → Interpres Transcripts** by default (one new file per session, date and time in the name).
+
+### For people who like the terminal
+
+```text
+cargo run --release
+# or after make-double-click.sh:
+./dist/Interpres/interpres probe
+./dist/Interpres/interpres set-folder "/Users/you/Documents/My Meeting Notes"
+./dist/Interpres/interpres remember on
+./dist/Interpres/interpres run
 ```
 
-This builds using `cargo build --release --features "gui,debug-logs"` and stages:
+---
 
-- `dist/interpres-test/interpres.exe` (the portable test binary)
-- `tools/` (dev plugins needed at runtime for now)
-- `TEST-RUN.txt` (instructions + test checklist)
+## Common commands
 
-Key debug feature:
-- `interpres-test-debug.log.txt` is automatically created **right next to the .exe** on every run.
-- Captures *everything* locally: plugin protocol (all SPEAK/PARTIAL/FINAL/AUDIO_OUT/ERROR/LOG lines), device selection & reliability events, capture supervisor, TTS/AI label roundtrips, startup URLs, panics with backtraces (set `RUST_BACKTRACE=1`), etc.
-- For the debug/test build, a console window pops showing the log file path + live output.
-- Perfect for investigation on real hardware (Mac/Win/Linux notes still apply via the exe).
+| Command | Meaning |
+|---------|---------|
+| `interpres run` | Capture while Live Captions is on (default) |
+| `interpres probe` | Self-check (is Live Captions running? any permission issue?) |
+| `interpres set-folder PATH` | Sticky transcript folder |
+| `interpres remember on` / `off` | Save to disk or not |
+| `interpres show-config` | Show current settings |
+| `interpres demo` | Create a sample transcript **without** Live Captions |
+| `interpres watch` | Print when Live Captions starts or stops |
+| `interpres help` | Short help |
 
-See the generated `TEST-RUN.txt` inside the bundle, [packaging/README.md](packaging/README.md), and [MD/DEPLOY-READINESS.md](MD/DEPLOY-READINESS.md) for the full pre-test list.
+---
 
-(The `debug-logs` feature is opt-in; normal builds stay lean and quiet.)
+## Privacy
 
-## Tech Stack (Zero-Dep Pivot)
+- Captions and transcripts stay **local** unless **you** copy files somewhere else  
+- Disk saving defaults to **off**  
+- Interpres is **not** a speech service in the cloud  
 
-| Layer | Implementation |
-|-------|----------------|
-| **Core** | Pure Rust `std` — VAD, plugin host, HTTP+SSE server, config |
-| **Audio** | `cpal` (single required dependency) |
-| **GUI** | `egui` / `eframe` (optional `--features gui` only) |
-| **Plugins** | Process-based text protocol; `plugin.yaml` discovery |
-| **Legacy UI** | Old Tauri+Svelte scaffold in `legacy/` (reference only) |
+Windows and Mac do not officially “export” Live Captions. Interpres reads the caption UI the accessibility way so *you* can keep a personal record.
 
-Direct dependencies: **1** (headless) or **3** (with GUI). See [ZERO-DEP-PLAN.md](ZERO-DEP-PLAN.md).
+---
 
-## Repository Layout
+## For developers
 
-```
-interpres/
-├── src/                 # Zero-dep core + engine + optional gui.rs
-├── plugins/             # Example plugin.yaml trees
-├── tools/               # dev_transcriber.py, dev_tts.py, setup_models.sh
-├── packaging/           # Release build scripts + installer notes
-├── MD/                  # Phase plans & architecture synthesis
-├── legacy/              # Abandoned Tauri stack (UX reference)
-├── BUILD.md
-├── ARCHITECTURE.md      # High-level design (being updated)
-└── PHASE1-STATUS.md … PHASE5-STATUS.md
+- **Strict zero third-party Rust crates** in the core (`Cargo.toml` has an empty `[dependencies]`)  
+- Platform access: process checks + hand-written OS APIs / small helpers under `helpers/`  
+- Plan of record: [`MD/LIVE-CAPTIONS-REBUILD-PLAN.md`](MD/LIVE-CAPTIONS-REBUILD-PLAN.md)  
+- Protocol / signal notes: [`docs/PROTOCOL.md`](docs/PROTOCOL.md), [`docs/SIGNALS.md`](docs/SIGNALS.md)  
+- License: **MIT OR Apache-2.0** — fork freely  
+
+```text
+cargo test
+cargo run -- probe
+cargo run -- demo
 ```
 
-## Documentation
+---
 
-- [BUILD.md](BUILD.md) — Build & run (Windows / macOS / Linux)
-- [MD/PHASES-OVERVIEW.md](MD/PHASES-OVERVIEW.md) — Phase roadmap
-- [MD/ALWAYS-ON-TOP-SUBTITLES-ARCHITECTURE.md](MD/ALWAYS-ON-TOP-SUBTITLES-ARCHITECTURE.md) — Overlay design
-- [docs/PLUGIN-PROTOCOL.md](docs/PLUGIN-PROTOCOL.md) — Plugin wire format
-- [packaging/README.md](packaging/README.md) — Release & installers
+## Accessibility keywords (plain language)
 
-## License
+If you are searching for tools around **live captions**, **real-time captions**, **offline transcripts**, **Deaf accessibility**, **hard of hearing**, **Windows 11 Live Captions**, **Mac Live Captions**, or **meeting caption history**, Interpres is a small local companion: it does not try to be another AI meeting bot — it helps you **keep the words** your system already shows.
 
-MIT OR Apache-2.0. Model weights follow their upstream licenses.
+---
+
+## Status
+
+Ground-up rebuild (v0.2): Live Captions companion, dated session files, sticky folder, probe, strict zero-dependency core. Optional polish (installers, tray watcher packaging) can grow on top without changing that core idea.
