@@ -29,7 +29,17 @@ No subscription. No cloud account. No paid product. Public open source for anyon
 
 You do **not** need the command line for day-to-day use.
 
-### Build a clickable app folder (once, on this computer)
+### Download a ready build (Mac)
+
+**GitHub Releases** (compiled app folder + bare binary):
+
+**https://github.com/IronAdamant/Interpres/releases**
+
+Latest: **[v0.2.0](https://github.com/IronAdamant/Interpres/releases/tag/v0.2.0)** — unzip **Interpres-portable-macos-aarch64.zip**, open **START HERE.txt**, double-click **Interpres.app**.
+
+Builds are **not obfuscated**. Curious people can rebuild from source and compare checksums — see [docs/VERIFY.md](docs/VERIFY.md). Windows users: build from the same tag with `cargo build --release` until a Windows `.exe` is attached to a future release.
+
+### Build a clickable app folder yourself (any Mac with Rust)
 
 Someone technical (or you, once) runs:
 
