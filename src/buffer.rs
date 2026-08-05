@@ -339,6 +339,13 @@ fn words_look_like_menu_command(s: &str) -> bool {
         || lower.contains("force quit")
         || lower.contains("full screen")
         || lower.contains("previous size")
+        || lower.contains("quarters")
+        || lower.contains("halves")
+        || lower.contains("bottom &")
+        || lower.contains("top &")
+        || lower.contains("left &")
+        || lower.contains("right &")
+        || (s.contains('&') && looks_like_title_case_chrome(s))
     {
         return true;
     }
