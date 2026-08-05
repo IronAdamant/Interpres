@@ -391,18 +391,20 @@ fn words_look_like_menu_command(lower: &str) -> bool {
             | "reset"
             | "clear"
             | "empty"
-            | "new"
-            | "get"
-            | "set"
             | "turn"
             | "enable"
             | "disable"
+            | "jump"
+            | "scroll"
+            | "navigate"
     ) || lower.contains("match style")
         || lower.contains("dictation")
         || lower.contains("emoji")
         || lower.contains("special character")
         || lower.contains("default position")
         || lower.contains("default size")
+        || lower.contains("to selection")
+        || lower.ends_with(" selection")
 }
 
 /// Pure surface pick used by AX scrape: drop junk-only input; prefer speech-like lines.
