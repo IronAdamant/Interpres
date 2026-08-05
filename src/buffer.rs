@@ -272,10 +272,27 @@ pub fn is_junk_line(s: &str) -> bool {
         || l.contains("use selection")
         || l.contains("for find")
         || l.contains("find and replace")
+        || l.contains("remove window")
+        || l.contains("window from")
+        || l.contains("from set")
+        || l.contains("move & resize")
+        || l.contains("move and resize")
+        || l.contains("merge all windows")
+        || l.contains("bring all to front")
         || l.starts_with("edit ")
         || l.starts_with("view ")
         || l.starts_with("window ")
         || l.starts_with("file ")
+        || (l.contains("window")
+            && (l.contains("remove")
+                || l.contains("move")
+                || l.contains("tile")
+                || l.contains("arrange")
+                || l.contains("fill")
+                || l.contains("center")
+                || l.contains("zoom")
+                || l.contains("minimize")
+                || l.contains("set")))
         || (l.contains("quit") && l.contains("live captions"))
         || (l.contains("spelling") && l.contains("grammar"))
         || (l.contains("spelling") && l.contains("automatically"))
@@ -517,6 +534,10 @@ mod tests {
         "Exit Full Screen",
         "Use Selection for Find",
         "Find and Replace",
+        "Remove Window from Set",
+        "Move & Resize",
+        "Bring All to Front",
+        "Merge All Windows",
     ];
 
     const REAL_CAPTION: &str = "The fuel is free, which sounds wonderful until you remember free fuel arrives on the weather schedule, not on yours.";
