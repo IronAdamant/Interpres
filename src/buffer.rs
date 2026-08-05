@@ -405,6 +405,10 @@ fn words_look_like_menu_command(lower: &str) -> bool {
         || lower.contains("default size")
         || lower.contains("to selection")
         || lower.ends_with(" selection")
+        || lower == "left to right"
+        || lower == "right to left"
+        || lower.contains("left to right")
+        || lower.contains("right to left")
 }
 
 /// Pure surface pick used by AX scrape: drop junk-only input; prefer speech-like lines.
@@ -493,22 +497,45 @@ fn score_one_caption_line(s: &str) -> i64 {
     } else if words < 3 {
         score -= 30;
     }
-    // All-Title-Case short phrases without sentence punctuation are usually menu chrome
-    // ("Restore Default Position"). Mixed-case speech ("President Biden said") is fine.
-    if words <= 5
-        && !s.contains('.')
-        && !s.contains('?')
-        && !s.contains('!')
-        && s.split_whitespace().all(|w| {
-            w.chars()
-                .next()
-                .map(|c| c.is_ascii_uppercase() || !c.is_alphabetic())
-                .unwrap_or(true)
-        })
-    {
+    // Short Title-Case / layout chrome ("Restore Default Position", "Left to Right").
+    // Mixed-case speech with a lowercase content word ("President Biden said") is fine.
+    if words <= 5 && looks_like_title_case_chrome(s) {
         score -= 250;
     }
     score
+}
+
+/// True for short menu/layout labels: mostly Capitalized, no long lowercase content words.
+fn looks_like_title_case_chrome(s: &str) -> bool {
+    if s.contains('.') || s.contains('?') || s.contains('!') {
+        return false;
+    }
+    let words: Vec<&str> = s.split_whitespace().collect();
+    if words.len() < 2 || words.len() > 5 {
+        return false;
+    }
+    let caps = words
+        .iter()
+        .filter(|w| {
+            w.chars()
+                .next()
+                .map(|c| c.is_ascii_uppercase())
+                .unwrap_or(false)
+        })
+        .count();
+    // Long lowercase token (≥4) usually means speech ("said", "about"), not menu chrome.
+    let lower_content = words.iter().any(|w| {
+        w.chars()
+            .next()
+            .map(|c| c.is_ascii_lowercase())
+            .unwrap_or(false)
+            && w.chars().count() >= 4
+    });
+    if lower_content {
+        return false;
+    }
+    // All or all-but-one words Capitalized (allows "to"/"and"/"from" in the middle).
+    caps >= words.len().saturating_sub(1)
 }
 
 fn looks_sentence_complete(s: &str) -> bool {
