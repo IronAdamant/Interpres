@@ -101,6 +101,7 @@ Windows and Mac do not officially “export” Live Captions. Interpres reads th
 - **Strict zero third-party Rust crates** in the core (`Cargo.toml` has an empty `[dependencies]`)  
 - Platform access: process checks + hand-written OS APIs / small helpers under `helpers/`  
 - Plan of record: [`MD/LIVE-CAPTIONS-REBUILD-PLAN.md`](MD/LIVE-CAPTIONS-REBUILD-PLAN.md)  
+- Known issues / fix plan: [`docs/KNOWN-ISSUES.md`](docs/KNOWN-ISSUES.md), [`MD/FIX-KNOWN-ISSUES-PLAN.md`](MD/FIX-KNOWN-ISSUES-PLAN.md)  
 - Protocol / signal notes: [`docs/PROTOCOL.md`](docs/PROTOCOL.md), [`docs/SIGNALS.md`](docs/SIGNALS.md)  
 - License: **MIT OR Apache-2.0** — fork freely  
 
@@ -121,3 +122,15 @@ If you are searching for tools around **live captions**, **real-time captions**,
 ## Status
 
 Ground-up rebuild (v0.2): Live Captions companion, dated session files, sticky folder, probe, strict zero-dependency core. Optional polish (installers, tray watcher packaging) can grow on top without changing that core idea.
+
+### Known issues (Mac)
+
+Confirmed from real Live Captions + YouTube sessions (and short AgentVideoParse frame packs):
+
+- macOS **chrome junk** sometimes scraped (e.g. “Correct Spelling Automatically”)  
+- **Save / folder labels** can disagree with real save state  
+- Live text can **lag** when the Accessibility surface sticks  
+- Occasional **near-duplicate** lines when captions rewrite a sentence  
+
+Details and status: **[docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md)**  
+Fix order: **[MD/FIX-KNOWN-ISSUES-PLAN.md](MD/FIX-KNOWN-ISSUES-PLAN.md)**
