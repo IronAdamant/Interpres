@@ -300,9 +300,12 @@ pub fn is_junk_line(s: &str) -> bool {
     {
         return true;
     }
+    // Short imperative / menu-bar commands (not spoken captions).
+    // Uses first-word verbs so "President Biden said" / "New York Times" stay speech.
+    if words_look_like_menu_command(&l) {
+        return true;
+    }
     // Filename-like single tokens (not spoken captions).
-    // Do **not** junk short Title-Case speech ("President Biden said", "New York Times").
-    // Window/menu chrome is covered by the explicit lists above.
     if !t.contains(' ') && (t.contains('.') || t.contains('_') || t.contains('-')) {
         return true;
     }
@@ -310,6 +313,84 @@ pub fn is_junk_line(s: &str) -> bool {
         return true;
     }
     false
+}
+
+/// Edit/Window/app menu commands: short lines starting with a UI verb.
+fn words_look_like_menu_command(lower: &str) -> bool {
+    let words: Vec<&str> = lower.split_whitespace().collect();
+    if words.is_empty() || words.len() > 6 {
+        return false;
+    }
+    // No sentence punctuation → more likely a menu label than a caption.
+    if lower.contains('.') || lower.contains('?') || lower.contains('!') {
+        return false;
+    }
+    let first = words[0];
+    matches!(
+        first,
+        "paste"
+            | "copy"
+            | "cut"
+            | "undo"
+            | "redo"
+            | "select"
+            | "hide"
+            | "show"
+            | "bring"
+            | "send"
+            | "make"
+            | "add"
+            | "remove"
+            | "merge"
+            | "arrange"
+            | "tile"
+            | "fill"
+            | "center"
+            | "zoom"
+            | "minimize"
+            | "close"
+            | "save"
+            | "open"
+            | "print"
+            | "find"
+            | "replace"
+            | "delete"
+            | "duplicate"
+            | "rename"
+            | "export"
+            | "import"
+            | "share"
+            | "start"
+            | "stop"
+            | "toggle"
+            | "use"
+            | "return"
+            | "enter"
+            | "exit"
+            | "force"
+            | "check"
+            | "correct"
+            | "capitalize"
+            | "capitalise"
+            | "move"
+            | "resize"
+            | "format"
+            | "insert"
+            | "services"
+            | "preferences"
+            | "settings"
+            | "about"
+            | "quit"
+            | "help"
+            | "window"
+            | "file"
+            | "edit"
+            | "view"
+            | "go"
+    ) || lower.contains("match style")
+        || lower.contains("dictation")
+        || lower.contains("emoji")
+        || lower.contains("special character")
 }
 
 /// Pure surface pick used by AX scrape: drop junk-only input; prefer speech-like lines.
@@ -538,6 +619,11 @@ mod tests {
         "Move & Resize",
         "Bring All to Front",
         "Merge All Windows",
+        "Paste and Match Style",
+        "Copy",
+        "Select All",
+        "Start Dictation…",
+        "Start Dictation",
     ];
 
     const REAL_CAPTION: &str = "The fuel is free, which sounds wonderful until you remember free fuel arrives on the weather schedule, not on yours.";
