@@ -21,7 +21,7 @@ These were **confirmed product issues**. Mitigations for items 1–5 landed in c
 
 **Why:** Accessibility scrape of Live Captions can also see system/app chrome; filters were incomplete.
 
-**Status:** **Closed in code (2026-08-05)** — expanded `is_junk_line`, `pick_caption_surface` never returns junk-only surfaces, unit tests cover all listed chrome + non-junk captions. **User re-test** on latest `dist/Interpres.app` recommended to confirm in a live YT session.
+**Status:** **Closed in code (2026-08-05)** — expanded `is_junk_line`, `pick_caption_surface` never returns junk-only surfaces; menu-verb rule does not drop real speech (“Open the door”); short proper-noun partials (e.g. New York Times) remain pickable. Unit tests: known chrome + `short_proper_noun_partials_are_not_junk` + `imperative_speech_not_menu_junk`. **User re-test** on latest `dist/Interpres.app` recommended.
 
 ---
 
