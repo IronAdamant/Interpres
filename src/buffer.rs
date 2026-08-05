@@ -345,6 +345,8 @@ fn words_look_like_menu_command(s: &str) -> bool {
         || lower.contains("top &")
         || lower.contains("left &")
         || lower.contains("right &")
+        || lower.contains("on screen")
+        || lower.contains("on top")
         || (s.contains('&') && looks_like_title_case_chrome(s))
     {
         return true;
@@ -426,6 +428,9 @@ fn words_look_like_menu_command(s: &str) -> bool {
             | "jump"
             | "scroll"
             | "navigate"
+            | "keep"
+            | "pin"
+            | "float"
     );
     if !is_menu_verb {
         return false;
