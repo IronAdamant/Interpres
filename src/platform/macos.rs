@@ -347,6 +347,8 @@ pub fn poll_text(presence: LiveCaptionsPresence) -> CaptureSnapshot {
     ));
 
     if surface.is_none() {
+        // AX trusted + process up, but only chrome / empty tree — not a permission error.
+        // Engine treats surface_text=None as empty ticks (clear live); probe stays exit 0.
         return CaptureSnapshot {
             process_running: true,
             detail: format!(
@@ -354,11 +356,7 @@ pub fn poll_text(presence: LiveCaptionsPresence) -> CaptureSnapshot {
                 presence.detail
             ),
             surface_text: None,
-            error: Some(
-                "Accessibility is on, but no caption text was found in the Live Captions UI tree. \
-                 Play audio with Live Captions visible, then run: interpres diagnose"
-                    .into(),
-            ),
+            error: None,
         };
     }
 

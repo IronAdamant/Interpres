@@ -283,32 +283,9 @@ pub fn is_junk_line(s: &str) -> bool {
     {
         return true;
     }
-    // Short menu/button chrome: few words, no sentence punctuation, mostly Capitalized.
-    let words = t.split_whitespace().count();
-    if words >= 2
-        && words <= 5
-        && !t.contains('.')
-        && !t.contains('?')
-        && !t.contains('!')
-    {
-        let caps = t
-            .split_whitespace()
-            .filter(|w| {
-                w.chars()
-                    .next()
-                    .map(|c| c.is_ascii_uppercase())
-                    .unwrap_or(false)
-            })
-            .count();
-        // e.g. "Use Selection for Find", "Return to Previous Size"
-        if caps >= words.saturating_sub(1) {
-            return true;
-        }
-        if words <= 3 && caps >= 2 {
-            return true;
-        }
-    }
-    // Filename-like single tokens
+    // Filename-like single tokens (not spoken captions).
+    // Do **not** junk short Title-Case speech ("President Biden said", "New York Times").
+    // Window/menu chrome is covered by the explicit lists above.
     if !t.contains(' ') && (t.contains('.') || t.contains('_') || t.contains('-')) {
         return true;
     }
@@ -397,8 +374,12 @@ fn score_one_caption_line(s: &str) -> i64 {
     {
         score -= 800;
     }
-    if words < 4 {
+    // Mild penalty for very short lines — do not drop 3-word speech partials
+    // ("President Biden said") which must remain pickable when they are the live edge.
+    if words < 2 {
         score -= 100;
+    } else if words < 3 {
+        score -= 30;
     }
     score
 }
@@ -540,6 +521,16 @@ mod tests {
 
     const REAL_CAPTION: &str = "The fuel is free, which sounds wonderful until you remember free fuel arrives on the weather schedule, not on yours.";
 
+    /// Short proper-noun / partial speech must NOT be treated as menu chrome.
+    const REAL_SHORT_PARTIALS: &[&str] = &[
+        "President Biden said",
+        "New York Times",
+        "Good Morning America",
+        "Senator Warren argued",
+        "Los Angeles traffic",
+        "United Nations meeting",
+    ];
+
     #[test]
     fn all_known_chrome_is_junk() {
         for s in KNOWN_JUNK {
@@ -554,6 +545,22 @@ mod tests {
             "Last year, California threw away roughly 3.4 million megawatt hours of clean electricity."
         ));
         assert!(!is_junk_line("Hello how are you doing today my friend"));
+    }
+
+    #[test]
+    fn short_proper_noun_partials_are_not_junk() {
+        for s in REAL_SHORT_PARTIALS {
+            assert!(
+                !is_junk_line(s),
+                "short speech must pass junk filter: {s:?}"
+            );
+            // Surface pick must keep them when they are the only candidates.
+            let picked = pick_caption_surface(std::iter::once(*s));
+            assert!(
+                picked.is_some(),
+                "pick_caption_surface dropped real partial: {s:?}"
+            );
+        }
     }
 
     #[test]

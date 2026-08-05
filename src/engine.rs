@@ -5,10 +5,7 @@ use crate::config::Config;
 use crate::lifecycle::{Lifecycle, LifecycleAction};
 use crate::platform;
 use crate::transcript::{format_clock, TranscriptWriter};
-use crate::ui_labels::{
-    session_open_status, should_clear_live_after_empty, should_show_lag_tip,
-    should_skip_stale_surface, LAG_TIP,
-};
+use crate::ui_labels::{session_open_status, LiveSurfaceTracker, LAG_TIP};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -169,8 +166,7 @@ fn run_loop(inner: Arc<EngineInner>, tx: Sender<EngineEvent>) {
     let mut writer: Option<TranscriptWriter> = None;
     let mut session_open = false;
     let mut err_ticks: u64 = 0;
-    let mut last_surface = String::new();
-    let mut stale_ticks: u64 = 0;
+    let mut surface_tr = LiveSurfaceTracker::new();
     let poll = cfg.poll_ms.max(250);
 
     while !inner.stop.load(Ordering::SeqCst) {
@@ -230,8 +226,7 @@ fn run_loop(inner: Arc<EngineInner>, tx: Sender<EngineEvent>) {
                             writer = w;
                             session_open = true;
                             buffer.reset();
-                            last_surface.clear();
-                            stale_ticks = 0;
+                            surface_tr.reset();
                         }
                         Err(e) => {
                             let _ = tx.send(EngineEvent::Error(format!(
@@ -268,31 +263,24 @@ fn run_loop(inner: Arc<EngineInner>, tx: Sender<EngineEvent>) {
                 err_ticks = 0;
             }
             if let Some(ref surface) = snap.surface_text {
-                // Detect AX surface stuck on the same string (common after FINAL or on chrome).
-                if surface == &last_surface {
-                    stale_ticks = stale_ticks.saturating_add(1);
-                } else {
-                    stale_ticks = 0;
-                    last_surface = surface.clone();
-                }
+                let tick =
+                    surface_tr.on_surface(surface, buffer.is_covered(surface));
                 crate::debuglog::log(&format!(
-                    "surface_chars={} stale={} preview={:?}",
+                    "surface_chars={} stale={} empty={} skip={} preview={:?}",
                     surface.chars().count(),
-                    stale_ticks,
+                    surface_tr.stale_ticks,
+                    surface_tr.empty_ticks,
+                    tick.skip_stale,
                     surface.chars().take(80).collect::<String>()
                 ));
 
-                if should_show_lag_tip(stale_ticks) {
+                if tick.show_lag_tip {
                     let _ = tx.send(EngineEvent::Status(LAG_TIP.into()));
                 }
 
-                // If AX is stuck on a line we already finalized, skip re-processing.
-                // Still re-check every 5th stale tick in case the string is growing in place
-                // with the same prefix (rare) or we missed a commit.
-                let skip_stale =
-                    should_skip_stale_surface(stale_ticks, buffer.is_covered(surface));
-
-                if !skip_stale {
+                // If AX is stuck on a line we already finalized, skip re-processing
+                // (tracker re-checks every 5th stale tick via should_skip_stale_surface).
+                if tick.process_surface {
                     match buffer.observe(surface) {
                         BufferEmit::Partial(t) => {
                             crate::debuglog::log(&format!("PARTIAL {t}"));
@@ -305,7 +293,7 @@ fn run_loop(inner: Arc<EngineInner>, tx: Sender<EngineEvent>) {
                             if let Some(ref mut w) = writer {
                                 let _ = w.write_final(&format_clock(SystemTime::now()), &t);
                             }
-                            stale_ticks = 0;
+                            surface_tr.note_final();
                         }
                         BufferEmit::Finals(v) => {
                             for t in v {
@@ -316,19 +304,19 @@ fn run_loop(inner: Arc<EngineInner>, tx: Sender<EngineEvent>) {
                                     let _ = w.write_final(&format_clock(SystemTime::now()), &t);
                                 }
                             }
-                            stale_ticks = 0;
+                            surface_tr.note_final();
                         }
                         BufferEmit::None => {}
                     }
                 }
             } else {
-                // No surface (junk filtered out) — clear live after a short while.
-                stale_ticks = stale_ticks.saturating_add(1);
-                if should_clear_live_after_empty(stale_ticks) {
-                    crate::debuglog::log("no caption surface (junk filtered or empty AX)");
+                // No surface (junk filtered out) — dedicated empty_ticks, not shared stale.
+                let tick = surface_tr.on_empty();
+                if tick.clear_live {
+                    crate::debuglog::log("no caption surface (junk filtered or empty AX) — clear live");
                     let _ = tx.send(EngineEvent::Live(String::new()));
                 }
-                if should_show_lag_tip(stale_ticks) {
+                if tick.show_lag_tip {
                     let _ = tx.send(EngineEvent::Status(format!(
                         "{LAG_TIP} (no caption surface — junk filtered or empty AX)"
                     )));

@@ -83,14 +83,86 @@ pub fn should_skip_stale_surface(stale_ticks: u64, already_covered: bool) -> boo
     stale_ticks > 6 && already_covered && (stale_ticks % 5 != 0)
 }
 
-/// Clear live caption box after this many empty/junk-only surface polls.
-pub fn should_clear_live_after_empty(stale_ticks: u64) -> bool {
-    stale_ticks == CLEAR_LIVE_AFTER_EMPTY_TICKS
+/// Clear live after N consecutive **empty/junk-only** polls (dedicated counter, not shared stale).
+pub fn should_clear_live_after_empty(empty_ticks: u64) -> bool {
+    empty_ticks == CLEAR_LIVE_AFTER_EMPTY_TICKS
 }
 
-/// Show lag tip after long stuck surface runs.
-pub fn should_show_lag_tip(stale_ticks: u64) -> bool {
-    stale_ticks == LAG_TIP_AFTER_STALE_TICKS
+/// Show lag tip after long stuck surface or empty runs.
+pub fn should_show_lag_tip(ticks: u64) -> bool {
+    ticks == LAG_TIP_AFTER_STALE_TICKS
+}
+
+/// Pure live-surface poll tracker used by the capture engine (testable without AX/threads).
+///
+/// `empty_ticks` is **not** shared with `stale_ticks`: after a long covered surface
+/// (stale_ticks ≫ 12), transitioning to junk-only/None still clears Live after
+/// exactly `CLEAR_LIVE_AFTER_EMPTY_TICKS` empty polls.
+#[derive(Clone, Debug, Default)]
+pub struct LiveSurfaceTracker {
+    pub last_surface: String,
+    pub stale_ticks: u64,
+    /// Consecutive polls with no caption surface (junk filtered or empty AX).
+    pub empty_ticks: u64,
+}
+
+/// Outcome of one poll tick for the live UI / buffer path.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LiveSurfaceTick {
+    /// Process this surface with the caption buffer (false when skip_stale).
+    pub process_surface: bool,
+    /// Skip re-processing an unchanged covered surface.
+    pub skip_stale: bool,
+    /// Clear the live caption box (empty path only).
+    pub clear_live: bool,
+    /// Show lag tip under status.
+    pub show_lag_tip: bool,
+}
+
+impl LiveSurfaceTracker {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Poll returned caption text.
+    pub fn on_surface(&mut self, surface: &str, already_covered: bool) -> LiveSurfaceTick {
+        self.empty_ticks = 0;
+        if surface == self.last_surface {
+            self.stale_ticks = self.stale_ticks.saturating_add(1);
+        } else {
+            self.stale_ticks = 0;
+            self.last_surface = surface.to_string();
+        }
+        let skip = should_skip_stale_surface(self.stale_ticks, already_covered);
+        LiveSurfaceTick {
+            process_surface: !skip,
+            skip_stale: skip,
+            clear_live: false,
+            show_lag_tip: should_show_lag_tip(self.stale_ticks),
+        }
+    }
+
+    /// Poll returned no caption surface (junk-only or empty AX).
+    pub fn on_empty(&mut self) -> LiveSurfaceTick {
+        self.empty_ticks = self.empty_ticks.saturating_add(1);
+        LiveSurfaceTick {
+            process_surface: false,
+            skip_stale: false,
+            clear_live: should_clear_live_after_empty(self.empty_ticks),
+            show_lag_tip: should_show_lag_tip(self.empty_ticks),
+        }
+    }
+
+    /// Buffer emitted a FINAL — surface may still be sticky; reset stale so we re-arm skip.
+    pub fn note_final(&mut self) {
+        self.stale_ticks = 0;
+    }
+
+    pub fn reset(&mut self) {
+        self.last_surface.clear();
+        self.stale_ticks = 0;
+        self.empty_ticks = 0;
+    }
 }
 
 #[cfg(test)]
@@ -166,8 +238,56 @@ mod tests {
         assert!(!should_skip_stale_surface(7, false));
         assert!(should_clear_live_after_empty(CLEAR_LIVE_AFTER_EMPTY_TICKS));
         assert!(!should_clear_live_after_empty(1));
+        // High shared stale must NOT clear live (old bug: reused stale_ticks == 12)
+        assert!(!should_clear_live_after_empty(50));
+        assert!(!should_clear_live_after_empty(13));
         assert!(should_show_lag_tip(LAG_TIP_AFTER_STALE_TICKS));
         assert!(!should_show_lag_tip(5));
         assert!(LAG_TIP.contains("Check setup"));
+    }
+
+    /// Phase C integration: long covered sticky surface, then empty ticks → clear Live.
+    /// Drives the shipped `LiveSurfaceTracker` used by the engine (not a reimplementation).
+    #[test]
+    fn covered_then_empty_ticks_clears_live() {
+        let mut tr = LiveSurfaceTracker::new();
+        let line = "Wind power works when the weather cooperates with the grid.";
+
+        // Many polls on the same covered surface (stale_ticks climbs well past 12).
+        for i in 0..30 {
+            let tick = tr.on_surface(line, true);
+            assert!(!tick.clear_live, "surface path never clears live");
+            if i > 6 && i % 5 != 0 {
+                assert!(tick.skip_stale, "stale covered surface should skip i={i}");
+                assert!(!tick.process_surface);
+            }
+        }
+        assert!(tr.stale_ticks >= 20, "stale_ticks={}", tr.stale_ticks);
+        assert_eq!(tr.empty_ticks, 0);
+
+        // Transition to junk-only / empty: empty_ticks starts at 0, not stale_ticks.
+        let mut cleared_at = None;
+        for i in 1..=CLEAR_LIVE_AFTER_EMPTY_TICKS + 3 {
+            let tick = tr.on_empty();
+            assert!(!tick.process_surface);
+            if tick.clear_live {
+                cleared_at = Some(i);
+                break;
+            }
+        }
+        assert_eq!(
+            cleared_at,
+            Some(CLEAR_LIVE_AFTER_EMPTY_TICKS),
+            "must clear exactly after {CLEAR_LIVE_AFTER_EMPTY_TICKS} empty ticks; \
+             empty_ticks={} stale_ticks={}",
+            tr.empty_ticks,
+            tr.stale_ticks
+        );
+
+        // New surface resets empty counter.
+        let tick = tr.on_surface("Fresh caption about solar farms on the coast today", false);
+        assert_eq!(tr.empty_ticks, 0);
+        assert!(tick.process_surface);
+        assert!(!tick.clear_live);
     }
 }
