@@ -10,7 +10,7 @@ readme = "README.md"
 keywords = ["live-captions", "accessibility", "deaf", "transcript", "offline"]
 categories = ["accessibility", "command-line-utilities"]
 
-# Strict zero-dependency: no crates.io packages in the shipping core.
+# Strict zero crates.io dependencies. Native Mac UI is AppKit via system clang (build.rs).
 [dependencies]
 
 [dev-dependencies]

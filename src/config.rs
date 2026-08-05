@@ -21,6 +21,8 @@ pub struct Config {
     pub helper_path: Option<PathBuf>,
     /// Caption source: `os` (default), `demo` (fixture/stdin), or helper path mode.
     pub source: String,
+    /// Write debug logs into the transcript folder (`interpres-debug.log` / session `.debug.log`).
+    pub debug: bool,
 }
 
 impl Default for Config {
@@ -30,9 +32,10 @@ impl Default for Config {
             transcript_folder: default_transcript_folder(),
             write_jsonl: false,
             off_delay_ms: 2500,
-            poll_ms: 1000,
+            poll_ms: 400, // snappier live catch-up
             helper_path: None,
             source: "os".to_string(),
+            debug: false,
         }
     }
 }
@@ -123,6 +126,7 @@ impl Config {
                         cfg.source = v.to_string();
                     }
                 }
+                "debug" => cfg.debug = parse_bool(v),
                 _ => {}
             }
         }
@@ -165,6 +169,7 @@ impl Config {
                 .unwrap_or_default()
         )?;
         writeln!(f, "source={}", self.source)?;
+        writeln!(f, "debug={}", if self.debug { "true" } else { "false" })?;
         Ok(())
     }
 }

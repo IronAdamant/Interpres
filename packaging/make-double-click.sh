@@ -23,25 +23,9 @@ cp "$ROOT/README.md" "$DIST/README.md"
 cat > "$DIST/Open Interpres.command" << 'EOF'
 #!/bin/bash
 cd "$(dirname "$0")"
-clear
-echo "========================================"
-echo "  Interpres — Live Captions companion"
-echo "========================================"
-echo ""
-echo "  1) Turn on Live Captions first"
-echo "     Mac: System Settings → Accessibility → Live Captions"
-echo "     Windows: Win + Ctrl + L"
-echo ""
-echo "  2) This window will start Interpres."
-echo "  3) Optional later: turn on saving with remember on"
-echo ""
-echo "Press Enter to start…"
-read -r _
-export INTERPRES_FRIENDLY=1
-./interpres run
-echo ""
-echo "Interpres stopped. Press Enter to close this window."
-read -r _
+# Opens the native Interpres window (not a webpage, not a long terminal session).
+export INTERPRES_GUI=1
+./interpres
 EOF
 chmod +x "$DIST/Open Interpres.command"
 
@@ -98,17 +82,14 @@ cp "$DIST/interpres" "$APP/Contents/Resources/interpres"
 chmod +x "$APP/Contents/Resources/interpres"
 cp -R "$DIST/helpers" "$APP/Contents/Resources/helpers" 2>/dev/null || true
 
-# Launcher: open Terminal and run the binary so the user sees messages
+# Launcher: run the real binary (native AppKit window — no Terminal, no webpage)
 cat > "$APP/Contents/MacOS/Interpres" << 'EOF'
 #!/bin/bash
 RES="$(cd "$(dirname "$0")/../Resources" && pwd)"
-# Open a Terminal window that runs Interpres (visible for non-technical users)
-osascript <<APPLESCRIPT
-tell application "Terminal"
-  activate
-  do script "clear; echo 'Interpres — Live Captions companion'; echo ''; echo 'Tip: turn on Live Captions first (System Settings → Accessibility → Live Captions).'; echo ''; cd '$RES'; export INTERPRES_FRIENDLY=1; ./interpres run; echo ''; echo 'Press Enter to close…'; read"
-end tell
-APPLESCRIPT
+cd "$RES" || exit 1
+export INTERPRES_GUI=1
+# No args → native window UI (Rust core + AppKit)
+exec ./interpres
 EOF
 chmod +x "$APP/Contents/MacOS/Interpres"
 
@@ -187,22 +168,26 @@ WHAT THIS IS
 
 ON A MAC (this computer)
   Easiest:  double-click  Interpres.app
+            → a normal Mac window opens (buttons, big text — not a website)
   Or:       double-click  “Open Interpres.command”
   First time Mac may ask to allow the app (right-click → Open if needed).
+
+  In the window:
+    1. Press “Check setup” if unsure
+    2. Press “Start listening”
+    3. Optional: “Save to disk: ON” and “Choose folder…”
 
   Also try:
     “Try demo (no Live Captions needed).command”  — sample transcript file
     “Check Live Captions (probe).command”         — is Live Captions on?
-    “Turn saving ON.command”                      — start saving to disk
 
 BEFORE YOU CAPTURE REAL CONVERSATIONS
   1. Turn on Live Captions
        Mac: System Settings → Accessibility → Live Captions
        Windows: Win + Ctrl + L
-  2. On Mac, if captions never appear in Interpres, allow Accessibility:
-       System Settings → Privacy & Security → Accessibility → enable Interpres / Terminal
-  3. Optional: Turn saving ON, then pick a folder later with a developer if needed
-     (or use: interpres set-folder "…")
+  2. On Mac, allow Accessibility for Interpres (and Terminal if you use CLI):
+       System Settings → Privacy & Security → Accessibility
+  3. Optional: turn on Save to disk in the window
 
 ON WINDOWS
   1. On a Windows PC with Rust:  cargo build --release

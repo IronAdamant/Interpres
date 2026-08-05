@@ -1,9 +1,13 @@
 //! Interpres — pure-`std` core for an OS Live Captions companion.
 //!
-//! Strict zero third-party crates. Platform scrape lives behind helpers / `cfg` FFI.
+//! Strict zero third-party crates (crates.io). Platform UI/scrape via system
+//! frameworks + hand-written FFI / native clang objects.
 
 pub mod buffer;
 pub mod config;
+pub mod debuglog;
+pub mod engine;
+pub mod gui;
 pub mod lifecycle;
 pub mod platform;
 pub mod plugin_host;

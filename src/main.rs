@@ -1,7 +1,8 @@
-//! Interpres CLI — OS Live Captions companion (strict zero-dependency).
+//! Interpres — native UI (default on Mac) + CLI. Zero crates.io dependencies.
 
 use interpres::buffer::{BufferEmit, CaptionBuffer};
 use interpres::config::Config;
+use interpres::gui;
 use interpres::lifecycle::{Lifecycle, LifecycleAction};
 use interpres::platform;
 use interpres::plugin_host::PluginHost;
@@ -19,15 +20,65 @@ use std::time::{Duration, SystemTime};
 
 fn main() {
     let mut args: Vec<String> = env::args().skip(1).collect();
-    // Double-click / .app launchers set this so we print a short welcome.
-    if env::var_os("INTERPRES_FRIENDLY").is_some() && args.is_empty() {
-        println!("Interpres is starting…");
-        println!("Leave Live Captions on while this runs. Ctrl+C (or close the window) to stop.\n");
-        args.push("run".into());
+
+    // Allow `interpres cli …` to force command-line mode.
+    if args.first().map(|a| a.as_str()) == Some("cli") {
+        args.remove(0);
+    } else {
+        // Non-technical default on Mac: open the native window.
+        // Double-click / .app also land here (no args, or INTERPRES_FRIENDLY).
+        let want_gui = args.is_empty()
+            || args.first().map(|a| a.as_str()) == Some("gui")
+            || env::var_os("INTERPRES_GUI").is_some()
+            || env::var_os("INTERPRES_FRIENDLY").is_some();
+        if want_gui {
+            #[cfg(target_os = "macos")]
+            {
+                if args.is_empty()
+                    || args[0] == "gui"
+                    || env::var_os("INTERPRES_FRIENDLY").is_some()
+                    || env::var_os("INTERPRES_GUI").is_some()
+                {
+                    // If they passed a real CLI subcommand with FRIENDLY, still honor CLI…
+                    let is_cli_cmd = args.first().map(|a| {
+                        matches!(
+                            a.as_str(),
+                            "run"
+                                | "probe"
+                                | "diagnose"
+                                | "watch"
+                                | "demo"
+                                | "help"
+                                | "set-folder"
+                                | "remember"
+                                | "show-config"
+                                | "fix-folder"
+                                | "version"
+                                | "-h"
+                                | "--help"
+                                | "-V"
+                                | "--version"
+                        )
+                    });
+                    if args.is_empty()
+                        || args[0] == "gui"
+                        || is_cli_cmd != Some(true)
+                    {
+                        std::process::exit(gui::run_native_gui());
+                    }
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                if args.is_empty() {
+                    args.push("run".into());
+                }
+            }
+        }
     }
+
     if args.is_empty() {
         print_help();
-        // Friendly default for non-technical users: run companion
         args.push("run".into());
     }
 
@@ -35,6 +86,7 @@ fn main() {
     let rest: Vec<&str> = args[1..].iter().map(|s| s.as_str()).collect();
 
     let code = match cmd {
+        "gui" => gui::run_native_gui(),
         "help" | "-h" | "--help" => {
             print_help();
             0
@@ -44,12 +96,14 @@ fn main() {
             0
         }
         "probe" => cmd_probe(),
+        "diagnose" => cmd_diagnose(),
         "run" => cmd_run(&rest),
         "watch" => cmd_watch(&rest),
         "set-folder" => cmd_set_folder(&rest),
         "show-config" => cmd_show_config(),
         "remember" => cmd_remember(&rest),
         "demo" => cmd_demo(&rest),
+        "fix-folder" => cmd_fix_folder(),
         other => {
             eprintln!("Unknown command: {other}");
             print_help();
@@ -61,35 +115,102 @@ fn main() {
 
 fn print_help() {
     println!(
-        r#"Interpres — save Windows & macOS Live Captions as transcripts
+        r#"Interpres — save Live Captions as transcripts
 
-Easy path:
-  1. Turn on Live Captions (Windows: Win+Ctrl+L · Mac: System Settings → Accessibility → Live Captions)
-  2. Run:  interpres run
-  3. Optional: interpres set-folder "/path/to/My Transcripts"
-  4. Optional: interpres remember on
+Non-technical (Mac): double-click the app, or run with no arguments → native window.
+  1. Turn on Live Captions (System Settings → Accessibility → Live Captions)
+  2. Press “Start listening”
+  3. Optional: “Save to disk: ON” and “Choose folder…”
 
-Commands:
-  run              Capture captions while Live Captions is on (default)
-  probe            Check if Live Captions is visible to Interpres
-  watch            Stay in the background; print open/close when Live Captions starts/stops
-  set-folder PATH  Choose where dated session files are saved (sticky)
-  remember on|off  Save transcripts to disk (default: off)
-  show-config      Print current settings
-  demo             Write a sample session without Live Captions (for testing)
-  help             This message
+Commands (advanced):
+  gui              Open the native window (Mac)
+  run              Capture in the terminal (no window)
+  probe / diagnose Setup checks
+  set-folder PATH  Sticky transcript folder
+  fix-folder       Reset to Documents/Interpres Transcripts
+  remember on|off  Save transcripts to disk
+  show-config | demo | watch | help
+  cli <cmd>        Force command-line mode
 
-Files are named like 2026-08-05_14-22-01.txt — one file per session.
-
-Free & open source. 100% local. Not a paid product.
+Zero crates.io dependencies. Free & open source. 100% local.
 "#
     );
 }
 
 fn cmd_probe() -> i32 {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = interpres::platform::macos::request_accessibility_prompt();
+    }
     let report = probe::run_probe();
     let _ = print_probe(&mut io::stdout(), &report);
+    if report.exit_code == probe::EXIT_PERMISSION {
+        println!();
+        println!(">>> ACTION NEEDED (Mac):");
+        println!("  1. System Settings → Privacy & Security → Accessibility");
+        println!("  2. Turn ON the app that runs Interpres:");
+        println!("       • Terminal  (if you started it from Terminal)");
+        println!("       • Interpres (if you double-clicked Interpres.app)");
+        println!("  3. Quit Interpres completely, open it again, run: interpres diagnose");
+        #[cfg(target_os = "macos")]
+        {
+            interpres::platform::macos::open_accessibility_settings();
+            println!("  (Tried to open Accessibility settings for you.)");
+        }
+    }
     report.exit_code
+}
+
+fn cmd_diagnose() -> i32 {
+    println!("Interpres diagnose");
+    let presence = platform::live_captions_present();
+    println!("live_captions_running={}", presence.running);
+    println!("detail={}", presence.detail);
+    #[cfg(target_os = "macos")]
+    {
+        for line in interpres::platform::macos::diagnose_lines() {
+            println!("{line}");
+        }
+        if !interpres::platform::macos::is_accessibility_trusted() {
+            interpres::platform::macos::open_accessibility_settings();
+            return probe::EXIT_PERMISSION;
+        }
+        if !presence.running {
+            return probe::EXIT_LC_NOT_RUNNING;
+        }
+        let snap = platform::poll_capture();
+        println!("surface_present={}", snap.surface_text.is_some());
+        if let Some(ref t) = snap.surface_text {
+            let preview: String = t.chars().take(200).collect();
+            println!("surface_preview={preview}");
+            return 0;
+        }
+        if let Some(e) = snap.error {
+            println!("error={e}");
+            return probe::EXIT_SIGNALS_STALE;
+        }
+        return probe::EXIT_SIGNALS_STALE;
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let report = probe::run_probe();
+        let _ = print_probe(&mut io::stdout(), &report);
+        report.exit_code
+    }
+}
+
+fn cmd_fix_folder() -> i32 {
+    let mut cfg = Config::load();
+    cfg.transcript_folder = interpres::config::default_transcript_folder();
+    if let Err(e) = cfg.save() {
+        eprintln!("Could not save settings: {e}");
+        return 1;
+    }
+    println!(
+        "Transcript folder reset to: {}",
+        cfg.transcript_folder.display()
+    );
+    0
 }
 
 fn cmd_show_config() -> i32 {
@@ -100,6 +221,7 @@ fn cmd_show_config() -> i32 {
     println!("off_delay_ms={}", cfg.off_delay_ms);
     println!("poll_ms={}", cfg.poll_ms);
     println!("source={}", cfg.source);
+    println!("debug={}", cfg.debug);
     println!(
         "helper_path={}",
         cfg.helper_path
@@ -340,18 +462,53 @@ fn run_with_helper(cfg: &Config, helper: &std::path::Path) -> i32 {
 }
 
 fn run_in_process(cfg: &Config) -> i32 {
+    let mut cfg = cfg.clone();
+    // Heal accidental temp folders from earlier tests.
+    let folder_s = cfg.transcript_folder.to_string_lossy();
+    if folder_s.contains("/var/folders/") || folder_s.contains("/tmp") || folder_s.contains("\\Temp")
+    {
+        cfg.transcript_folder = interpres::config::default_transcript_folder();
+        let _ = cfg.save();
+        println!(
+            "Note: save folder was a temp path; reset to {}",
+            cfg.transcript_folder.display()
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if !interpres::platform::macos::is_accessibility_trusted() {
+            println!("Requesting macOS Accessibility permission…");
+            let _ = interpres::platform::macos::request_accessibility_prompt();
+            if !interpres::platform::macos::is_accessibility_trusted() {
+                println!();
+                println!(">>> Captions cannot be read until Accessibility is ON.");
+                println!("    System Settings → Privacy & Security → Accessibility");
+                println!("    Enable Terminal (or Interpres.app), then quit & reopen this app.");
+                interpres::platform::macos::open_accessibility_settings();
+            }
+        }
+    }
+
     let mut life = Lifecycle::new(cfg.off_delay_ms);
     let mut buffer = CaptionBuffer::new();
     buffer.stable_needed = 3;
 
     let mut writer: Option<TranscriptWriter> = None;
     let mut session_open = false;
+    let mut ticks_since_err: u64 = 0;
 
     let stop = Arc::new(AtomicBool::new(false));
     ctrlc_flag(stop.clone());
 
     println!("Waiting for Live Captions… (Ctrl+C to stop)");
-    println!("Run  interpres probe  if nothing happens.");
+    if !cfg.remember {
+        println!("Remember is OFF — you will see text here but nothing is saved to disk.");
+        println!("  Turn on with:  interpres remember on");
+    } else {
+        println!("Saving to: {}", cfg.transcript_folder.display());
+    }
+    println!("If nothing appears, run:  interpres diagnose");
 
     while !stop.load(Ordering::SeqCst) {
         let snap = platform::poll_capture();
@@ -366,11 +523,11 @@ fn run_in_process(cfg: &Config) -> i32 {
                         reason: snap.detail.clone(),
                     }
                 );
-                if snap.error.is_some() {
+                if let Some(ref err) = snap.error {
                     println!(
                         "{}",
                         CaptionEvent::Error {
-                            message: snap.error.clone().unwrap_or_default(),
+                            message: err.clone(),
                         }
                     );
                 }
@@ -385,6 +542,8 @@ fn run_in_process(cfg: &Config) -> i32 {
                         Ok(w) => {
                             if let Some(ref wr) = w {
                                 println!("Session file: {}", wr.txt_path().display());
+                            } else if cfg.remember {
+                                println!("(remember on but no file — check folder permissions)");
                             }
                             writer = w;
                             session_open = true;
@@ -402,7 +561,6 @@ fn run_in_process(cfg: &Config) -> i32 {
                         reason: "live_captions_stopped".into(),
                     }
                 );
-                // flush buffer
                 match buffer.finish() {
                     BufferEmit::Final(t) => {
                         println!("FINAL {t}");
@@ -426,21 +584,15 @@ fn run_in_process(cfg: &Config) -> i32 {
                 }
                 writer = None;
                 session_open = false;
-                // Stay running to wait for next LC open (appliance mode)
             }
             LifecycleAction::None => {}
         }
 
         if life.companion_active {
             if let Some(ref err) = snap.error {
-                // Emit once-ish: print degraded each poll is noisy — throttle simply
-                static mut LAST: bool = false;
-                let show = unsafe {
-                    let was = LAST;
-                    LAST = true;
-                    !was
-                };
-                if show {
+                ticks_since_err += 1;
+                // Remind every ~15s so permission issues are not silent.
+                if ticks_since_err == 1 || ticks_since_err % 15 == 0 {
                     println!(
                         "{}",
                         CaptionEvent::Status {
@@ -448,7 +600,10 @@ fn run_in_process(cfg: &Config) -> i32 {
                             reason: err.clone(),
                         }
                     );
+                    println!("  Still no caption text. Run: interpres diagnose");
                 }
+            } else {
+                ticks_since_err = 0;
             }
             if let Some(ref surface) = snap.surface_text {
                 match buffer.observe(surface) {

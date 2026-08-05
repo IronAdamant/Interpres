@@ -25,83 +25,46 @@ No subscription. No cloud account. No paid product. Public open source for anyon
 
 ---
 
-## Easy start (non-technical) — double-click, no terminal
+## Easy start (non-technical) — real Mac window, not a webpage
 
-You do **not** need the command line for day-to-day use.
+You do **not** need the command line for day-to-day use.  
+On a Mac, Interpres opens a **custom native window** (AppKit). Rust keeps working in the background. **No browser UI. No crates.io GUI frameworks.**
 
 ### Download a ready build (Mac)
 
-**GitHub Releases** (compiled app folder + bare binary):
-
 **https://github.com/IronAdamant/Interpres/releases**
 
-Latest: **[v0.2.0](https://github.com/IronAdamant/Interpres/releases/tag/v0.2.0)** — unzip **Interpres-portable-macos-aarch64.zip**, open **START HERE.txt**, double-click **Interpres.app**.
+Unzip the portable pack → double-click **Interpres.app**.
 
-Builds are **not obfuscated**. Curious people can rebuild from source and compare checksums — see [docs/VERIFY.md](docs/VERIFY.md). Windows users: build from the same tag with `cargo build --release` until a Windows `.exe` is attached to a future release.
+Builds are **not obfuscated** — see [docs/VERIFY.md](docs/VERIFY.md).
 
-### Build a clickable app folder yourself (any Mac with Rust)
-
-Someone technical (or you, once) runs:
+### Build the clickable app yourself (Mac with Rust)
 
 ```text
 ./packaging/make-double-click.sh
-```
-
-That creates **`dist/Interpres/`** with:
-
-| Double-click this | What it does |
-|-------------------|--------------|
-| **Interpres.app** (Mac) | Opens Terminal and starts Interpres |
-| **Open Interpres.command** (Mac) | Same idea without a full .app |
-| **Open Interpres.bat** (Windows) | After you place `interpres.exe` in the folder |
-| **Try demo…** | Sample transcript — no Live Captions needed |
-| **Turn saving ON** | Start saving sessions to disk |
-| **START HERE.txt** | Short plain-language guide |
-
-Open the folder:
-
-```text
 open dist/Interpres
 ```
 
-Then **double-click `Interpres.app`** (or `Open Interpres.command`).  
-First time on a Mac: if Gatekeeper blocks it, **right-click → Open**.
+Then double-click **Interpres.app**.
 
-A zip is also made: `dist/Interpres-portable-macos.zip` — you can copy that folder to another Mac of the same kind (Apple silicon vs Intel must match the build).
+### What you do in the window
 
-### 1. Turn on Live Captions
+1. Turn on **Live Captions** (System Settings → Accessibility → Live Captions)  
+2. Press **Check setup** if you want a permission check  
+3. Press **Start listening**  
+4. Optional: **Save to disk: ON** and **Choose folder…**
 
-**Windows 11**
+If captions never appear: System Settings → Privacy & Security → **Accessibility** → enable **Interpres**.
 
-- Press **Win + Ctrl + L**, or  
-- Settings → Accessibility → Captions → **Live captions**
-
-**Mac**
-
-- System Settings → Accessibility → **Live Captions** → turn on  
-- If capture is empty: System Settings → Privacy & Security → **Accessibility** → allow **Interpres** and/or **Terminal**
-
-### 2. Start Interpres
-
-- **Preferred:** double-click **Interpres.app** or **Open Interpres.command** in `dist/Interpres`  
-- **Windows:** double-click **Open Interpres.bat** (with `interpres.exe` in the same folder)
-
-### 3. Saving (optional)
-
-Double-click **Turn saving ON.command**, or on Windows run `interpres.exe remember on`.  
-Files go under **Documents → Interpres Transcripts** by default (one new file per session, date and time in the name).
-
-### For people who like the terminal
+### Advanced (terminal)
 
 ```text
-cargo run --release
-# or after make-double-click.sh:
-./dist/Interpres/interpres probe
-./dist/Interpres/interpres set-folder "/Users/you/Documents/My Meeting Notes"
-./dist/Interpres/interpres remember on
-./dist/Interpres/interpres run
+cargo run --release          # opens the native window on Mac
+cargo run --release -- run   # CLI only
+cargo test
 ```
 
+Zero **crates.io** dependencies. Mac UI is system **AppKit** compiled with `clang` (`native/macos/`, `build.rs`).
 ---
 
 ## Common commands

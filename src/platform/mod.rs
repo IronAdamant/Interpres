@@ -4,7 +4,7 @@ mod detect;
 mod signals;
 
 #[cfg(target_os = "macos")]
-mod macos;
+pub mod macos;
 
 #[cfg(windows)]
 mod windows;
