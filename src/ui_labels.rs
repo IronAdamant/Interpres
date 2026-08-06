@@ -42,12 +42,47 @@ pub fn remember_toggle_status(save_on: bool, folder: &Path) -> String {
 pub fn session_open_status(save_on: bool, session_txt: Option<&Path>) -> String {
     if save_on {
         if let Some(p) = session_txt {
-            format!("Saving session to {} (Save is ON)", p.display())
+            format!(
+                "Saving what Live Captions shows to {} (Save is ON)",
+                p.display()
+            )
         } else {
-            "Listening… Save is ON but no session file was created.".to_string()
+            "Listening to Live Captions… Save is ON but no session file was created.".to_string()
         }
     } else {
-        "Listening (not saving — turn on Save to disk).".to_string()
+        "Listening to Live Captions (not saving — turn on Save to disk).".to_string()
+    }
+}
+
+/// Status while capture is running (companion to OS Live Captions — not a standalone captioner).
+pub fn listening_status() -> &'static str {
+    #[cfg(windows)]
+    {
+        "Listening to Live Captions… Keep system Live Captions open (Win+Ctrl+L) and play audio. Interpres only saves what captions already show."
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "Listening to Live Captions… Keep system Live Captions on. Interpres only saves what captions already show."
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        "Listening… Live Captions companion (requires OS Live Captions)."
+    }
+}
+
+/// Cold-start / idle guidance before Start listening.
+pub fn idle_setup_status() -> &'static str {
+    #[cfg(windows)]
+    {
+        "Turn on Windows Live Captions first (Win+Ctrl+L), then press Start listening. Interpres cannot caption by itself."
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "Turn on Mac Live Captions first (System Settings → Accessibility), then press Start listening. Interpres cannot caption by itself."
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        "Live Captions companion — turn on OS Live Captions, then Start listening."
     }
 }
 
@@ -247,6 +282,31 @@ impl LiveSurfaceTracker {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn listening_and_idle_status_mention_live_captions_companion() {
+        let listen = listening_status();
+        assert!(
+            listen.to_ascii_lowercase().contains("live captions"),
+            "{listen}"
+        );
+        assert!(
+            !listen.to_ascii_lowercase().contains("speech engine"),
+            "{listen}"
+        );
+        let idle = idle_setup_status();
+        assert!(
+            idle.to_ascii_lowercase().contains("live captions"),
+            "{idle}"
+        );
+        assert!(
+            idle.to_ascii_lowercase().contains("cannot")
+                || idle.to_ascii_lowercase().contains("by itself"),
+            "idle must say Interpres is not standalone: {idle}"
+        );
+        let open = session_open_status(true, Some(Path::new("/tmp/s.txt")));
+        assert!(open.contains("Live Captions") || open.contains("Saving"));
+    }
 
     #[test]
     fn capture_error_hysteresis_clears_on_success_and_needs_streak() {

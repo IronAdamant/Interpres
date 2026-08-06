@@ -107,8 +107,8 @@ static NSScrollView *makeScrollText(NSRect frame, NSTextView **outView, CGFloat 
 
     /* Title */
     [content addSubview:makeLabel(@"Interpres", NSMakeRect(24, h - 56, 400, 36), 28, YES)];
-    [content addSubview:makeLabel(@"Saves what Live Captions say — on this Mac only",
-                                   NSMakeRect(24, h - 84, 600, 24), 14, NO)];
+    [content addSubview:makeLabel(@"Records what Live Captions already shows — not a captioner by itself",
+                                   NSMakeRect(24, h - 84, 700, 24), 14, NO)];
 
     /* Big controls row */
     g_startBtn = makeButton(@"▶  Start listening", self, @selector(onStart:),

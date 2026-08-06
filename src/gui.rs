@@ -251,9 +251,7 @@ extern "C" fn cb_ready(user: *mut c_void) {
     set_remember_ui(remember);
     set_debug_ui(cfg.debug);
     set_session(None);
-    set_status(
-        "Turn on Live Captions (System Settings → Accessibility), then press Start listening.",
-    );
+    set_status(crate::ui_labels::idle_setup_status());
     crate::debuglog::set_folder(&folder);
     crate::debuglog::log(&format!(
         "ui ready folder={} remember={} debug={}",

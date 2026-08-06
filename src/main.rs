@@ -117,24 +117,16 @@ fn print_help() {
     #[cfg(windows)]
     {
         println!(
-            r#"Interpres — save Live Captions as transcripts
+            r#"Interpres — local companion that records what Live Captions shows
 
-Windows (native window): double-click interpres.exe, or run with no arguments.
-  1. Turn on Live Captions: Win+Ctrl+L
-  2. Press “Start listening”
-  3. Optional: “Save to disk: ON” and “Choose folder…”
+Not a speech engine. Requires Windows Live Captions (Win+Ctrl+L). Cannot work alone.
+Cannot guarantee 100% accuracy — only that captions can be saved when LC works.
 
-Keep Get-LiveCaptionsText.ps1 next to interpres.exe (portable pack includes it).
+Easy: download a Release pack, open interpres.exe, Start listening.
+Optional: Save to disk ON. Keep Get-LiveCaptionsText.ps1 next to the exe.
 
 Commands (advanced):
-  gui              Open the native window
-  run              Capture in the terminal (no window)
-  probe / diagnose Setup checks
-  set-folder PATH  Sticky transcript folder
-  fix-folder       Reset to Documents\Interpres Transcripts
-  remember on|off  Save transcripts to disk
-  show-config | demo | watch | help
-  cli <cmd>        Force command-line mode
+  gui | run | probe | diagnose | set-folder | remember | demo | help | cli
 
 Zero crates.io dependencies. Free & open source. 100% local.
 "#
@@ -143,22 +135,16 @@ Zero crates.io dependencies. Free & open source. 100% local.
     #[cfg(target_os = "macos")]
     {
         println!(
-            r#"Interpres — save Live Captions as transcripts
+            r#"Interpres — local companion that records what Live Captions shows
 
-Non-technical (Mac): double-click the app, or run with no arguments → native window.
-  1. Turn on Live Captions (System Settings → Accessibility → Live Captions)
-  2. Press “Start listening”
-  3. Optional: “Save to disk: ON” and “Choose folder…”
+Not a speech engine. Requires Mac Live Captions. Cannot work alone.
+Cannot guarantee 100% accuracy — only that captions can be saved when LC works.
+
+Easy: download a Release, open Interpres.app, Start listening.
+Optional: Save to disk ON. Accessibility may be required.
 
 Commands (advanced):
-  gui              Open the native window (Mac)
-  run              Capture in the terminal (no window)
-  probe / diagnose Setup checks
-  set-folder PATH  Sticky transcript folder
-  fix-folder       Reset to Documents/Interpres Transcripts
-  remember on|off  Save transcripts to disk
-  show-config | demo | watch | help
-  cli <cmd>        Force command-line mode
+  gui | run | probe | diagnose | set-folder | remember | demo | help | cli
 
 Zero crates.io dependencies. Free & open source. 100% local.
 "#

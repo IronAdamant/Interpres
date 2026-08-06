@@ -423,6 +423,13 @@ fn last_segment(s: &str) -> String {
     segment_captions(s).into_iter().last().unwrap_or_default()
 }
 
+/// Current live-edge phrase for the Live UI — last segment of a rolling LC surface,
+/// not the entire multi-sentence blob. Public so engine/GUI can display Live consistently.
+pub fn live_edge_phrase(surface: &str) -> String {
+    let cleaned = clean_surface(surface);
+    last_segment(&cleaned)
+}
+
 fn clean_surface(s: &str) -> String {
     // Prefer a short tail so we track the live edge, not a giant sticky history blob.
     let segs = segment_captions(s);
@@ -1420,6 +1427,44 @@ mod tests {
             "committed={:?}",
             b2.committed
         );
+    }
+
+    #[test]
+    fn live_edge_prefers_last_phrase_not_full_blob() {
+        let blob = "today we're not typically what I print with, but I don't think that this would have any problem handling this, especially because it does keep internal temperatures in the chamber quite well, at least in my experience. I do think that this printer will continue to be a workhorse for me, however.";
+        let edge = live_edge_phrase(blob);
+        assert!(
+            edge.to_ascii_lowercase().contains("workhorse")
+                || edge.to_ascii_lowercase().contains("however"),
+            "live edge should be last sentence, got {edge:?}"
+        );
+        assert!(
+            !edge.to_ascii_lowercase().contains("today we're not typically")
+                || edge.chars().count() < blob.chars().count() / 2,
+            "live edge must not be the entire multi-sentence blob ({})",
+            edge.chars().count()
+        );
+        // Growing single phrase: edge is that phrase.
+        let one = "so this just arrived in the post today";
+        assert_eq!(live_edge_phrase(one), one);
+        // observe PARTIAL should also surface last clause only
+        let mut b = CaptionBuffer::new();
+        match b.observe(blob) {
+            BufferEmit::Partial(t) => {
+                assert!(
+                    t.chars().count() < blob.chars().count(),
+                    "PARTIAL live edge shorter than full blob"
+                );
+            }
+            other => {
+                // May Final first settled sentence(s) + partial last
+                match other {
+                    BufferEmit::Final(_) | BufferEmit::Finals(_) | BufferEmit::Revised(_) => {}
+                    BufferEmit::None => {}
+                    BufferEmit::Partial(_) => unreachable!(),
+                }
+            }
+        }
     }
 
     /// Empty surface observe must leave-window finalize short real phrases in previous.

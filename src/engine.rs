@@ -1,6 +1,6 @@
 //! Background Live Captions capture engine (pure std). Used by GUI and CLI.
 
-use crate::buffer::{BufferEmit, CaptionBuffer};
+use crate::buffer::{live_edge_phrase, BufferEmit, CaptionBuffer};
 use crate::config::Config;
 use crate::lifecycle::{Lifecycle, LifecycleAction};
 use crate::platform;
@@ -104,11 +104,7 @@ impl CaptureEngine {
         let tx = self.tx.clone();
         let _ = tx.send(EngineEvent::Listening(true));
         let _ = tx.send(EngineEvent::Status(
-            #[cfg(windows)]
-            "Listening… Keep Live Captions open (Win+Ctrl+L) and play audio."
-                .into(),
-            #[cfg(not(windows))]
-            "Listening… Turn on Live Captions and play audio.".into(),
+            crate::ui_labels::listening_status().into(),
         ));
 
         let folder = self.folder();
@@ -272,7 +268,7 @@ fn run_loop(inner: Arc<EngineInner>, tx: Sender<EngineEvent>) {
                     )));
                 } else {
                     let _ = tx.send(EngineEvent::Status(
-                        "Listening… Keep Live Captions open and play audio.".into(),
+                        crate::ui_labels::listening_status().into(),
                     ));
                 }
             } else if err_tick.show_hard_error {
@@ -302,12 +298,21 @@ fn run_loop(inner: Arc<EngineInner>, tx: Sender<EngineEvent>) {
                 if tick.process_surface {
                     match buffer.observe(surface) {
                         BufferEmit::Partial(t) => {
-                            crate::debuglog::log(&format!("PARTIAL {t}"));
-                            let _ = tx.send(EngineEvent::Live(t));
+                            // Live UI: current phrase only (not the whole rolling LC blob).
+                            let edge = live_edge_phrase(&t);
+                            let edge = if edge.is_empty() { t } else { edge };
+                            crate::debuglog::log(&format!("PARTIAL {edge}"));
+                            let _ = tx.send(EngineEvent::Live(edge));
                         }
                         BufferEmit::Final(t) => {
                             crate::debuglog::log(&format!("FINAL {t}"));
-                            let _ = tx.send(EngineEvent::Live(t.clone()));
+                            let edge = live_edge_phrase(&t);
+                            let edge = if edge.is_empty() {
+                                t.clone()
+                            } else {
+                                edge
+                            };
+                            let _ = tx.send(EngineEvent::Live(edge));
                             let _ = tx.send(EngineEvent::Final(t.clone()));
                             if let Some(ref mut w) = writer {
                                 let _ = w.write_final(&format_clock(SystemTime::now()), &t);
@@ -316,7 +321,13 @@ fn run_loop(inner: Arc<EngineInner>, tx: Sender<EngineEvent>) {
                         }
                         BufferEmit::Revised(t) => {
                             crate::debuglog::log(&format!("REVISED {t}"));
-                            let _ = tx.send(EngineEvent::Live(t.clone()));
+                            let edge = live_edge_phrase(&t);
+                            let edge = if edge.is_empty() {
+                                t.clone()
+                            } else {
+                                edge
+                            };
+                            let _ = tx.send(EngineEvent::Live(edge));
                             let _ = tx.send(EngineEvent::Revised(t.clone()));
                             if let Some(ref mut w) = writer {
                                 let _ = w.write_final(&format_clock(SystemTime::now()), &t);
@@ -326,7 +337,13 @@ fn run_loop(inner: Arc<EngineInner>, tx: Sender<EngineEvent>) {
                         BufferEmit::Finals(v) => {
                             for t in v {
                                 crate::debuglog::log(&format!("FINAL {t}"));
-                                let _ = tx.send(EngineEvent::Live(t.clone()));
+                                let edge = live_edge_phrase(&t);
+                                let edge = if edge.is_empty() {
+                                    t.clone()
+                                } else {
+                                    edge
+                                };
+                                let _ = tx.send(EngineEvent::Live(edge));
                                 let _ = tx.send(EngineEvent::Final(t.clone()));
                                 if let Some(ref mut w) = writer {
                                     let _ = w.write_final(&format_clock(SystemTime::now()), &t);

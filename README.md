@@ -4,146 +4,121 @@
   <img src="assets/logo-256.png" alt="Interpres logo — caption lines and live sound waves" width="128" height="128" />
 </p>
 
-**Save what Live Captions say — so you can read it again later.**
+**Save what Live Captions already shows — so you can read it again later.**
 
-Interpres is a free, open-source helper for **Deaf and hard of hearing** people on **Windows** and **Mac**. It does not replace your captions. It works **with** the Live Captions your computer already has.
+Interpres is a free, open-source helper for **Deaf and hard of hearing** people on **Windows** and **Mac**.  
+It does **not** replace Live Captions. It does **not** listen to your microphone by itself.  
+It works **with** the Live Captions your computer already has, and can **save** those words into a simple text file on your PC or Mac.
 
-This project was **rebuilt from the ground up**. After real meetings, interviews, and everyday conversations, it became clear that **Windows Live Captions** and **macOS Live Captions** already work well for *reading* speech live. What was missing was a simple, local way to **keep a transcript** — one file per session, with the date and time — so you can remember what was said.
-
-No subscription. No cloud account. No paid product. Public open source for anyone to use or fork.
-
----
-
-## What it does
-
-| You already have | Interpres adds |
-|------------------|----------------|
-| Live Captions on screen | Optional **saved transcript** |
-| Great for the moment | Great for **later** (notes, follow-up, “what did they say?”) |
-
-- Works with **Windows 11 Live Captions** and **Mac Live Captions**
-- **You choose the folder** for transcripts (it remembers that folder)
-- **One new file per session**, named with **date and time** (for example `2026-08-05_14-22-01.txt`)
-- Saving is **off until you turn it on** (your privacy, your choice)
-- Everything stays **on your computer**
+No subscription. No cloud account. No paid product. Everything stays **on your computer** unless **you** copy the files somewhere else.
 
 ---
 
-## Easy start (non-technical) — real Mac window, not a webpage
+## Please read this first (important)
 
-You do **not** need the command line for day-to-day use.  
-On a Mac, Interpres opens a **custom native window** (AppKit). Rust keeps working in the background. **No browser UI. No crates.io GUI frameworks.**
+| Interpres **is** | Interpres **is not** |
+|------------------|----------------------|
+| A **local recording companion** for OS Live Captions | A speech-to-text engine on its own |
+| Able to **save** what captions show when they work | A guarantee of **100% accurate** words |
+| Meant to work **with** Windows or Mac Live Captions | A replacement for Live Captions |
+| Best-effort (captions can revise, lag, or miss words) | Perfect legal or medical transcripts |
 
-### Download a ready build (Mac)
+**Plain language:**
+
+- Interpres only captures **what Live Captions is already showing** on screen.  
+- If Live Captions is wrong, late, or empty, Interpres can only save **that** — it cannot “hear better” than the OS.  
+- Live Captions often **rewrites** a line as it improves the guess. Interpres tries to follow those updates, but **cannot promise perfection**.  
+- You turn on **system Live Captions first**. Interpres **cannot work alone**.
+
+This tool is for **keeping a personal record** of what your captions showed (notes, “what did they say?”, follow-up) — not for promising every word of a meeting forever.
+
+---
+
+## Easy start (no programming)
+
+### 1. Download a ready build
 
 **https://github.com/IronAdamant/Interpres/releases**
 
-Unzip the portable pack → double-click **Interpres.app**.
+Pick the pack for your computer:
 
-Builds are **not obfuscated** — see [docs/VERIFY.md](docs/VERIFY.md).
+| Computer | What to download | What to open |
+|----------|------------------|--------------|
+| **Mac** | Portable Mac pack (zip) | Double-click **Interpres.app** |
+| **Windows** | Portable Windows pack (zip) | Open the folder → double-click **interpres.exe** or **Open Interpres.bat** |
 
-### Build the clickable app yourself (Mac with Rust)
+You do **not** need to install from the App Store or use the terminal for normal use.
 
-```text
-./packaging/make-double-click.sh
-open dist/Interpres
-```
+### 2. Turn on Live Captions (required)
 
-Then double-click **Interpres.app**.
+| Mac | Windows |
+|-----|---------|
+| **System Settings → Accessibility → Live Captions → On** | **Win + Ctrl + L** (or Settings → Accessibility → Captions → Live captions) |
 
-### What you do in the window
+Play audio (video, call, meeting) so captions appear.
 
-1. Turn on **Live Captions** (System Settings → Accessibility → Live Captions)  
-2. Press **Check setup** if you want a permission check  
-3. Press **Start listening**  
-4. Optional: **Save to disk: ON** and **Choose folder…**
+### 3. Use Interpres
 
-If captions never appear: System Settings → Privacy & Security → **Accessibility** → enable **Interpres**.
+1. Open Interpres (app or `.exe` as above).  
+2. Press **Start listening**.  
+3. Optional: **Save to disk: ON** and **Choose folder…** (default is often Documents → Interpres Transcripts).  
+4. When you finish, press **Stop**.
 
-### Advanced (terminal)
+**Mac only:** if no text appears, System Settings → Privacy & Security → **Accessibility** → allow **Interpres** (or Terminal if you use the command line). Quit and reopen Interpres after changing that.
 
-```text
-cargo run --release          # opens the native window on Mac
-cargo run --release -- run   # CLI only
-cargo test
-```
+**Windows only:** keep the included `Get-LiveCaptionsText.ps1` **in the same folder** as `interpres.exe` (the release pack already does this).
 
-Zero **crates.io** dependencies. Mac UI is system **AppKit** compiled with `clang` (`native/macos/`, `build.rs`).
+### 4. Find your files
 
-### Windows (native window portable pack)
+When saving is **ON**, each session creates a new text file with the **date and time** in the name, for example:
 
-```text
-cargo build --release
-powershell -NoProfile -ExecutionPolicy Bypass -File packaging\make-windows-release.ps1
-```
-
-Then open `dist\Interpres-windows\` and double-click **interpres.exe** (or **Open Interpres.bat**).  
-After **Win+Ctrl+L** Live Captions, press **Start listening**.  
-Keep `Get-LiveCaptionsText.ps1` next to `interpres.exe` — the pack includes it.  
-Windows UI is hand-written **Win32** (`src/gui_win.rs`); macOS UI is **AppKit** — same core engine.
-
----
-
-## Common commands
-
-| Command | Meaning |
-|---------|---------|
-| `interpres run` | Capture while Live Captions is on (default) |
-| `interpres probe` | Self-check (is Live Captions running? any permission issue?) |
-| `interpres set-folder PATH` | Sticky transcript folder |
-| `interpres remember on` / `off` | Save to disk or not |
-| `interpres show-config` | Show current settings |
-| `interpres demo` | Create a sample transcript **without** Live Captions |
-| `interpres watch` | Print when Live Captions starts or stops |
-| `interpres help` | Short help |
+`2026-08-06_14-22-01.txt`
 
 ---
 
 ## Privacy
 
-- Captions and transcripts stay **local** unless **you** copy files somewhere else  
-- Disk saving defaults to **off**  
-- Interpres is **not** a speech service in the cloud  
-
-Windows and Mac do not officially “export” Live Captions. Interpres reads the caption UI the accessibility way so *you* can keep a personal record.
+- Captions and transcripts stay **local** unless **you** move them.  
+- Saving to disk defaults to **off** until you turn it on.  
+- Interpres is **not** a cloud speech service.
 
 ---
 
-## For developers
+## Common questions
 
-- **Strict zero third-party Rust crates** in the core (`Cargo.toml` has an empty `[dependencies]`)  
-- Platform access: process checks + hand-written OS APIs / small helpers under `helpers/`  
-- Plan of record: [`MD/LIVE-CAPTIONS-REBUILD-PLAN.md`](MD/LIVE-CAPTIONS-REBUILD-PLAN.md)  
-- Known issues / fix plan: [`docs/KNOWN-ISSUES.md`](docs/KNOWN-ISSUES.md), [`MD/FIX-KNOWN-ISSUES-PLAN.md`](MD/FIX-KNOWN-ISSUES-PLAN.md)  
-- Protocol / signal notes: [`docs/PROTOCOL.md`](docs/PROTOCOL.md), [`docs/SIGNALS.md`](docs/SIGNALS.md)  
-- License: **MIT OR Apache-2.0** — fork freely  
+**Why is a word wrong in the file?**  
+Live Captions guessed wrong or rewrote the line. Interpres saved what captions showed. It cannot fix OS speech recognition.
+
+**Why is the live box empty?**  
+Live Captions may be off, paused, or not trusted (Mac Accessibility). Use **Check setup** on Mac, or turn Live Captions on with **Win+Ctrl+L** on Windows, then **Start listening**.
+
+**Can I use this without Live Captions?**  
+Only **demo** mode (sample file). Real capture always needs OS Live Captions.
+
+---
+
+## For developers (advanced)
+
+Strict **zero crates.io** dependencies. Native UI: **AppKit** on Mac, **Win32** on Windows. Same core engine.
 
 ```text
 cargo test
-cargo run -- probe
-cargo run -- demo
+cargo build --release
 ```
 
----
+| Platform | Package a portable folder |
+|----------|---------------------------|
+| Mac | `./packaging/make-double-click.sh` |
+| Windows | `powershell -NoProfile -ExecutionPolicy Bypass -File packaging\make-windows-release.ps1` |
 
-## Accessibility keywords (plain language)
+CLI (optional): `interpres run`, `probe`, `diagnose`, `remember on|off`, `set-folder`, `demo`, `help`.
 
-If you are searching for tools around **live captions**, **real-time captions**, **offline transcripts**, **Deaf accessibility**, **hard of hearing**, **Windows 11 Live Captions**, **Mac Live Captions**, or **meeting caption history**, Interpres is a small local companion: it does not try to be another AI meeting bot — it helps you **keep the words** your system already shows.
+More detail: [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md), [docs/SIGNALS.md](docs/SIGNALS.md), [docs/VERIFY.md](docs/VERIFY.md), [MD/LIVE-CAPTIONS-REBUILD-PLAN.md](MD/LIVE-CAPTIONS-REBUILD-PLAN.md).
+
+License: **MIT OR Apache-2.0**.
 
 ---
 
 ## Status
 
-Ground-up rebuild (v0.2): Live Captions companion, dated session files, sticky folder, probe, strict zero-dependency core. Optional polish (installers, tray watcher packaging) can grow on top without changing that core idea.
-
-### Known issues (Mac)
-
-Confirmed from real Live Captions + YouTube sessions (and short AgentVideoParse frame packs):
-
-- macOS **chrome junk** sometimes scraped (e.g. “Correct Spelling Automatically”)  
-- **Save / folder labels** can disagree with real save state  
-- Live text can **lag** when the Accessibility surface sticks  
-- Occasional **near-duplicate** lines when captions rewrite a sentence  
-
-Details and status: **[docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md)**  
-Fix order: **[MD/FIX-KNOWN-ISSUES-PLAN.md](MD/FIX-KNOWN-ISSUES-PLAN.md)**
+**v0.2** — Windows and Mac Live Captions companion: native window, opt-in dated session files, sticky folder, local only. Best-effort capture of the OS caption surface; not a standalone captioner.

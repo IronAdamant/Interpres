@@ -669,10 +669,7 @@ fn on_button(id: i32) {
                 if let Ok(ui) = app.ui.lock() {
                     set_folder_label_ui(&ui, &folder);
                     set_remember_btn(&ui, remember);
-                    set_text(
-                        ui.status,
-                        "Starting… Listening for Live Captions (Win+Ctrl+L).",
-                    );
+                    set_text(ui.status, crate::ui_labels::listening_status());
                 }
             });
             with_app(|app| {
@@ -1141,7 +1138,7 @@ pub fn run_windows_gui() -> i32 {
         title: child("STATIC", "Interpres", SS_LEFT | SS_NOPREFIX, 0, 0, 10, 10, main, IDC_TITLE, instance),
         subtitle: child(
             "STATIC",
-            "Saves what Live Captions say — on this PC only",
+            "Records what Live Captions already shows — not a captioner by itself",
             SS_LEFT | SS_NOPREFIX,
             0,
             0,
@@ -1187,7 +1184,7 @@ pub fn run_windows_gui() -> i32 {
         status_lbl: child("STATIC", "Status", SS_LEFT | SS_NOPREFIX, 0, 0, 10, 10, main, IDC_STATUS_LBL, instance),
         status: child(
             "STATIC",
-            "Turn on Live Captions (Win+Ctrl+L), then press Start listening.",
+            crate::ui_labels::idle_setup_status(),
             SS_LEFT | SS_NOPREFIX,
             0,
             0,
