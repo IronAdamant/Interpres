@@ -52,6 +52,7 @@ Pick the pack for your computer:
 |----------|------------------|--------------|
 | **Mac** | Portable Mac pack (zip) | Double-click **Interpres.app** |
 | **Windows** | Portable Windows pack (zip) | Open the folder → double-click **interpres.exe** or **Open Interpres.bat** |
+| **Linux** | *Not supported* (no official build) | See [Linux](#linux-not-supported-officially) below |
 
 You do **not** need to install from the App Store or use the terminal for normal use.
 
@@ -101,6 +102,28 @@ Live Captions may be off, paused, or not trusted (Mac Accessibility). Use **Chec
 **Can I use this without Live Captions?**  
 Only **demo** mode (sample file). Real capture always needs OS Live Captions.
 
+**Does this work on Linux?**  
+**Not as an official product.** See [Linux](#linux-not-supported-officially) below.
+
+---
+
+## Linux (not supported officially)
+
+**Interpres is maintained for Windows and Mac only.**
+
+Most Linux desktops do **not** ship a built-in Live Captions feature the way Windows and macOS do. Captioning on Linux is usually a **separate app** you install (or browser Live Caption), and every distro / DE / language setup differs.
+
+**If you want Interpres-style behaviour on Linux:**
+
+1. **Fork this repository** under your own account.  
+2. Wire capture to **whatever caption program you use** on your distro (system accessibility text, a third-party live-captions app, browser captions, etc.).  
+3. Own the work for **your** desktop environment, packaging, and especially **your language** — speech models and UI text surfaces are not the same as English OS Live Captions.  
+4. Publish your fork under the same **MIT OR Apache-2.0** terms if you wish; that is the point of open source.
+
+The shared Rust **core** (session files, buffer, config) may be useful as a starting point. There is **no** commitment to implement, test, or support a Linux capture path, native UI, or multi-language caption backends here. Time and funding for that work are not available for this project.
+
+Please do **not** open issues asking for “Linux support” or “add language X” as project deliverables. PRs that keep the Mac/Windows product intact and document a fork-friendly hook are welcome to discuss; full platform ownership stays with the fork maintainer.
+
 ---
 
 ## For developers (advanced)
@@ -118,6 +141,7 @@ cargo build --release
 |----------|---------------------------|
 | Mac | `./packaging/make-double-click.sh` |
 | Windows | `powershell -NoProfile -ExecutionPolicy Bypass -File packaging\make-windows-release.ps1` |
+| Linux | No packaging script — [fork if you need it](#linux-not-supported-officially) |
 
 CLI (optional): `interpres run`, `probe`, `diagnose`, `remember on|off`, `set-folder`, `demo`, `help`.
 
@@ -129,4 +153,4 @@ License: **MIT OR Apache-2.0**.
 
 ## Status
 
-**v0.2** — Windows and Mac Live Captions companion: native window, opt-in dated session files, sticky folder, local only. Best-effort capture of the OS caption surface; not a standalone captioner.
+**v0.2** — **Windows and Mac** Live Captions companion: native window, opt-in dated session files, sticky folder, local only. Best-effort capture of the OS caption surface; not a standalone captioner. **Linux is not an official target** — fork if you need another OS or language stack.
