@@ -1,10 +1,13 @@
 //! Windows Live Captions text capture via UI Automation (hand-written COM FFI).
 //!
 //! Compiles only on Windows. Uses system OLE/COM + UIAutomationCore.
+//! Primary text path today: PowerShell + UIAutomationClient (OS assemblies),
+//! with FindWindow process/window checks in-process.
 
 use super::detect::LiveCaptionsPresence;
 use super::signals::windows_signals;
 use super::CaptureSnapshot;
+use std::path::{Path, PathBuf};
 use std::ptr;
 
 // Minimal Win32 / UIA bindings.
@@ -60,73 +63,174 @@ fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-/// Best-effort UIA read of CaptionsTextBlock Name.
-/// Full COM vtable walk is fragile; we use FindWindow + a simplified path.
-/// When UIA automation is unavailable, return process-running with degraded note.
-pub fn poll_text(presence: LiveCaptionsPresence) -> CaptureSnapshot {
-    let signals = windows_signals();
-    let class = to_wide(signals.window_classes.first().copied().unwrap_or("LiveCaptionsDesktopWindow"));
+/// Locate `Get-LiveCaptionsText.ps1` next to the binary, cwd, or common layout.
+pub fn find_uia_helper() -> Option<PathBuf> {
+    let name = "Get-LiveCaptionsText.ps1";
+    let rel = Path::new("helpers").join("windows").join(name);
+    let mut candidates: Vec<PathBuf> = Vec::new();
 
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join(&rel));
+            candidates.push(dir.join(name));
+            // Portable pack: exe in root, helpers/ beside it
+            candidates.push(dir.join("helpers").join("windows").join(name));
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join(&rel));
+        candidates.push(cwd.join(name));
+        candidates.push(cwd.join("helpers").join("windows").join(name));
+    }
+    candidates.push(rel);
+    candidates.push(PathBuf::from(name));
+
+    for c in candidates {
+        if c.is_file() {
+            return Some(c);
+        }
+    }
+    None
+}
+
+fn live_captions_window_found() -> bool {
+    let signals = windows_signals();
+    let class = to_wide(
+        signals
+            .window_classes
+            .first()
+            .copied()
+            .unwrap_or("LiveCaptionsDesktopWindow"),
+    );
     let hwnd = unsafe { FindWindowW(class.as_ptr(), ptr::null()) };
-    if hwnd.is_null() {
+    !hwnd.is_null()
+}
+
+/// Best-effort UIA read of CaptionsTextBlock Name.
+/// Full COM vtable walk is fragile; we use FindWindow + PowerShell UIAutomation.
+pub fn poll_text(presence: LiveCaptionsPresence) -> CaptureSnapshot {
+    if !live_captions_window_found() {
         return CaptureSnapshot {
             process_running: true,
             detail: presence.detail,
             surface_text: None,
             error: Some(
-                "LiveCaptions process found but LiveCaptionsDesktopWindow not found".into(),
+                "LiveCaptions process found but LiveCaptionsDesktopWindow not found \
+                 (is Live Captions open? Win+Ctrl+L)"
+                    .into(),
             ),
         };
     }
 
-    // Attempt CoInitialize + UIA ElementFromHandle via dynamic approach is large.
-    // Ship a helper script path recommended; in-process we report window found and
-    // try helper if configured. For pure in-process, call external PowerShell UIA.
     if let Some(text) = try_uia_via_powershell() {
         return CaptureSnapshot {
             process_running: true,
-            detail: format!("{}; window=LiveCaptionsDesktopWindow; via=powershell-uia", presence.detail),
+            detail: format!(
+                "{}; window=LiveCaptionsDesktopWindow; via=powershell-uia",
+                presence.detail
+            ),
             surface_text: Some(text),
             error: None,
         };
     }
 
+    let helper_hint = find_uia_helper()
+        .map(|p| format!("helper at {}", p.display()))
+        .unwrap_or_else(|| {
+            "helpers/windows/Get-LiveCaptionsText.ps1 not found next to interpres.exe".into()
+        });
+
     CaptureSnapshot {
         process_running: true,
         detail: format!("{}; window=LiveCaptionsDesktopWindow", presence.detail),
         surface_text: None,
-        error: Some(
-            "UIA text scrape needs helpers/windows/Get-LiveCaptionsText.ps1 beside the binary, \
-             or run: interpres run --helper <path>"
-                .into(),
-        ),
+        error: Some(format!(
+            "UIA text scrape failed ({helper_hint}). \
+             Keep Get-LiveCaptionsText.ps1 beside the binary, or: interpres run --helper <path>. \
+             Ensure Live Captions is showing text."
+        )),
     }
 }
 
 fn try_uia_via_powershell() -> Option<String> {
-    // Prefer helper next to exe or known relative path
-    let candidates = [
-        "helpers/windows/Get-LiveCaptionsText.ps1",
-        "Get-LiveCaptionsText.ps1",
-    ];
-    for c in candidates {
-        if std::path::Path::new(c).exists() {
-            let out = std::process::Command::new("powershell")
-                .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", c])
-                .output()
-                .ok()?;
-            if out.status.success() {
-                let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                if !s.is_empty() {
-                    return Some(s);
-                }
+    let helper = find_uia_helper()?;
+    run_uia_helper(&helper)
+}
+
+fn run_uia_helper(helper: &Path) -> Option<String> {
+    // Prefer Windows PowerShell 5.1; fall back to pwsh if present.
+    for shell in ["powershell.exe", "powershell", "pwsh.exe", "pwsh"] {
+        let out = std::process::Command::new(shell)
+            .args([
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+            ])
+            .arg(helper)
+            .output();
+        let Ok(out) = out else {
+            continue;
+        };
+        if out.status.success() {
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !s.is_empty() {
+                return Some(s);
             }
         }
     }
     None
 }
 
-// Silence unused COM imports when powershell path is used primarily.
+/// Extra diagnostics for `interpres diagnose` on Windows.
+pub fn diagnose_lines() -> Vec<String> {
+    let mut lines = Vec::new();
+    let presence = super::detect::live_captions_present();
+    lines.push(format!("process_running={}", presence.running));
+    lines.push(format!("detail={}", presence.detail));
+    lines.push(format!("window_found={}", live_captions_window_found()));
+
+    match find_uia_helper() {
+        Some(h) => {
+            lines.push(format!("helper={}", h.display()));
+            match run_uia_helper(&h) {
+                Some(text) => {
+                    lines.push(format!("helper_ok=true chars={}", text.chars().count()));
+                    let preview: String = text.chars().take(120).collect();
+                    lines.push(format!("surface_preview={preview}"));
+                }
+                None => {
+                    lines.push("helper_ok=false (empty output or non-zero exit)".into());
+                    lines.push(
+                        "Tip: turn Live Captions on (Win+Ctrl+L) and play audio so text appears."
+                            .into(),
+                    );
+                }
+            }
+        }
+        None => {
+            lines.push("helper=not_found".into());
+            lines.push(
+                "Place helpers/windows/Get-LiveCaptionsText.ps1 next to interpres.exe \
+                 (portable pack does this automatically)."
+                    .into(),
+            );
+        }
+    }
+
+    if presence.running {
+        let snap = poll_text(presence);
+        lines.push(format!("poll_surface={}", snap.surface_text.is_some()));
+        if let Some(e) = snap.error {
+            lines.push(format!("poll_error={e}"));
+        }
+    }
+
+    lines.push("Windows tip: Live Captions is Win+Ctrl+L (Settings → Accessibility → Captions).".into());
+    lines
+}
+
+// Scaffold for a future full in-process UIA COM walk (no PowerShell).
 #[allow(dead_code)]
 fn _ensure_com_symbols_linked() {
     unsafe {

@@ -5,6 +5,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use crate::buffer::same_or_refinement;
 use crate::session::{format_session_stamp, unique_session_stem};
 
 /// Writes one session's captions to a user-chosen folder.
@@ -16,6 +17,8 @@ pub struct TranscriptWriter {
     jsonl: Option<File>,
     source_label: String,
     line_count: u64,
+    /// Last caption body written (for draft→polish rewrite of the same family).
+    last_final_text: Option<String>,
 }
 
 impl TranscriptWriter {
@@ -62,6 +65,7 @@ impl TranscriptWriter {
             jsonl,
             source_label: source_label.to_string(),
             line_count: 0,
+            last_final_text: None,
         }))
     }
 
@@ -82,10 +86,19 @@ impl TranscriptWriter {
     }
 
     /// Append a finalized caption line (human TXT + optional JSONL).
+    /// If `text` is a polish of the last written final, rewrite that line instead of duplicating.
     pub fn write_final(&mut self, clock_hhmmss: &str, text: &str) -> io::Result<()> {
         let text = text.trim();
         if text.is_empty() {
             return Ok(());
+        }
+        if let Some(ref last) = self.last_final_text {
+            if same_or_refinement(last, text) && text != last.as_str() {
+                return self.rewrite_last_final(clock_hhmmss, text);
+            }
+            if text == last.as_str() {
+                return Ok(());
+            }
         }
         writeln!(self.txt, "[{clock_hhmmss}] {text}")?;
         self.txt.flush()?;
@@ -99,6 +112,43 @@ impl TranscriptWriter {
             j.flush()?;
         }
         self.line_count += 1;
+        self.last_final_text = Some(text.to_string());
+        Ok(())
+    }
+
+    fn rewrite_last_final(&mut self, clock_hhmmss: &str, text: &str) -> io::Result<()> {
+        use std::io::{Seek, SeekFrom};
+
+        let raw = fs::read_to_string(&self.txt_path)?;
+        let mut last_caption_idx: Option<usize> = None;
+        for (i, l) in raw.lines().enumerate() {
+            if l.starts_with('[') && l.contains(']') {
+                last_caption_idx = Some(i);
+            }
+        }
+        let mut body = String::new();
+        for (i, l) in raw.lines().enumerate() {
+            if Some(i) == last_caption_idx {
+                continue;
+            }
+            body.push_str(l);
+            body.push('\n');
+        }
+        body.push_str(&format!("[{clock_hhmmss}] {text}\n"));
+        self.txt.set_len(0)?;
+        self.txt.seek(SeekFrom::Start(0))?;
+        self.txt.write_all(body.as_bytes())?;
+        self.txt.flush()?;
+        if let Some(ref mut j) = self.jsonl {
+            let esc = json_escape(text);
+            let src = json_escape(&self.source_label);
+            writeln!(
+                j,
+                "{{\"v\":1,\"t\":\"{clock_hhmmss}\",\"kind\":\"revised\",\"src\":\"{src}\",\"text\":\"{esc}\"}}"
+            )?;
+            j.flush()?;
+        }
+        self.last_final_text = Some(text.to_string());
         Ok(())
     }
 

@@ -25,14 +25,14 @@ fn main() {
     if args.first().map(|a| a.as_str()) == Some("cli") {
         args.remove(0);
     } else {
-        // Non-technical default on Mac: open the native window.
-        // Double-click / .app also land here (no args, or INTERPRES_FRIENDLY).
+        // Non-technical default: open the native window (Win32 / AppKit).
+        // Double-click also lands here (no args, or INTERPRES_FRIENDLY / INTERPRES_GUI).
         let want_gui = args.is_empty()
             || args.first().map(|a| a.as_str()) == Some("gui")
             || env::var_os("INTERPRES_GUI").is_some()
             || env::var_os("INTERPRES_FRIENDLY").is_some();
         if want_gui {
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             {
                 if args.is_empty()
                     || args[0] == "gui"
@@ -68,7 +68,7 @@ fn main() {
                     }
                 }
             }
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(any(target_os = "macos", windows)))]
             {
                 if args.is_empty() {
                     args.push("run".into());
@@ -114,8 +114,36 @@ fn main() {
 }
 
 fn print_help() {
-    println!(
-        r#"Interpres — save Live Captions as transcripts
+    #[cfg(windows)]
+    {
+        println!(
+            r#"Interpres — save Live Captions as transcripts
+
+Windows (native window): double-click interpres.exe, or run with no arguments.
+  1. Turn on Live Captions: Win+Ctrl+L
+  2. Press “Start listening”
+  3. Optional: “Save to disk: ON” and “Choose folder…”
+
+Keep Get-LiveCaptionsText.ps1 next to interpres.exe (portable pack includes it).
+
+Commands (advanced):
+  gui              Open the native window
+  run              Capture in the terminal (no window)
+  probe / diagnose Setup checks
+  set-folder PATH  Sticky transcript folder
+  fix-folder       Reset to Documents\Interpres Transcripts
+  remember on|off  Save transcripts to disk
+  show-config | demo | watch | help
+  cli <cmd>        Force command-line mode
+
+Zero crates.io dependencies. Free & open source. 100% local.
+"#
+        );
+    }
+    #[cfg(target_os = "macos")]
+    {
+        println!(
+            r#"Interpres — save Live Captions as transcripts
 
 Non-technical (Mac): double-click the app, or run with no arguments → native window.
   1. Turn on Live Captions (System Settings → Accessibility → Live Captions)
@@ -134,7 +162,18 @@ Commands (advanced):
 
 Zero crates.io dependencies. Free & open source. 100% local.
 "#
-    );
+        );
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        println!(
+            r#"Interpres — save Live Captions as transcripts
+
+Live Captions capture is implemented for Windows and macOS.
+Commands: run | probe | diagnose | set-folder | remember | demo | help
+"#
+        );
+    }
 }
 
 fn cmd_probe() -> i32 {
@@ -191,7 +230,30 @@ fn cmd_diagnose() -> i32 {
         }
         return probe::EXIT_SIGNALS_STALE;
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        for line in interpres::platform::windows::diagnose_lines() {
+            println!("{line}");
+        }
+        if !presence.running {
+            println!();
+            println!(">>> Turn on Live Captions: Win+Ctrl+L");
+            return probe::EXIT_LC_NOT_RUNNING;
+        }
+        let snap = platform::poll_capture();
+        println!("surface_present={}", snap.surface_text.is_some());
+        if let Some(ref t) = snap.surface_text {
+            let preview: String = t.chars().take(200).collect();
+            println!("surface_preview={preview}");
+            return 0;
+        }
+        if let Some(e) = snap.error {
+            println!("error={e}");
+            return probe::EXIT_SIGNALS_STALE;
+        }
+        probe::EXIT_SIGNALS_STALE
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         let report = probe::run_probe();
         let _ = print_probe(&mut io::stdout(), &report);
@@ -496,7 +558,7 @@ fn run_in_process(cfg: &Config) -> i32 {
 
     let mut writer: Option<TranscriptWriter> = None;
     let mut session_open = false;
-    let mut ticks_since_err: u64 = 0;
+    let mut err_hyst = interpres::ui_labels::CaptureErrorHysteresis::new();
 
     let stop = Arc::new(AtomicBool::new(false));
     ctrlc_flag(stop.clone());
@@ -562,8 +624,14 @@ fn run_in_process(cfg: &Config) -> i32 {
                     }
                 );
                 match buffer.finish() {
-                    BufferEmit::Final(t) => {
+                    BufferEmit::Final(t) | BufferEmit::Partial(t) => {
                         println!("FINAL {t}");
+                        if let Some(ref mut w) = writer {
+                            let _ = w.write_final(&format_clock(SystemTime::now()), &t);
+                        }
+                    }
+                    BufferEmit::Revised(t) => {
+                        println!("REVISED {t}");
                         if let Some(ref mut w) = writer {
                             let _ = w.write_final(&format_clock(SystemTime::now()), &t);
                         }
@@ -576,7 +644,7 @@ fn run_in_process(cfg: &Config) -> i32 {
                             }
                         }
                     }
-                    _ => {}
+                    BufferEmit::None => {}
                 }
                 if let Some(ref mut w) = writer {
                     let _ = w.end_session("lc_stopped");
@@ -589,10 +657,18 @@ fn run_in_process(cfg: &Config) -> i32 {
         }
 
         if life.companion_active {
-            if let Some(ref err) = snap.error {
-                ticks_since_err += 1;
-                // Remind every ~15s so permission issues are not silent.
-                if ticks_since_err == 1 || ticks_since_err % 15 == 0 {
+            let surface_ok = snap.surface_text.as_ref().is_some_and(|s| !s.trim().is_empty());
+            let err_tick = err_hyst.on_poll(surface_ok, snap.error.as_deref());
+            if err_tick.clear_error {
+                println!(
+                    "{}",
+                    CaptionEvent::Status {
+                        lc: LcState::Running,
+                        reason: "capture_ok".into(),
+                    }
+                );
+            } else if err_tick.show_hard_error {
+                if let Some(ref err) = err_tick.message {
                     println!(
                         "{}",
                         CaptionEvent::Status {
@@ -602,8 +678,6 @@ fn run_in_process(cfg: &Config) -> i32 {
                     );
                     println!("  Still no caption text. Run: interpres diagnose");
                 }
-            } else {
-                ticks_since_err = 0;
             }
             if let Some(ref surface) = snap.surface_text {
                 match buffer.observe(surface) {
@@ -612,6 +686,12 @@ fn run_in_process(cfg: &Config) -> i32 {
                     }
                     BufferEmit::Final(t) => {
                         println!("FINAL {t}");
+                        if let Some(ref mut w) = writer {
+                            let _ = w.write_final(&format_clock(SystemTime::now()), &t);
+                        }
+                    }
+                    BufferEmit::Revised(t) => {
+                        println!("REVISED {t}");
                         if let Some(ref mut w) = writer {
                             let _ = w.write_final(&format_clock(SystemTime::now()), &t);
                         }
@@ -673,7 +753,7 @@ fn source_label() -> &'static str {
     }
 }
 
-/// Best-effort Ctrl+C without crates: install no handler on unsupported, use flag via SIGINT on unix.
+/// Best-effort Ctrl+C without crates: SIGINT on Unix, SetConsoleCtrlHandler on Windows.
 fn ctrlc_flag(stop: Arc<AtomicBool>) {
     #[cfg(unix)]
     {
@@ -683,14 +763,21 @@ fn ctrlc_flag(stop: Arc<AtomicBool>) {
             libc_signal(SIGINT, handle_sigint);
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        // SAFETY: handler only stores a flag; process continues until the run loop exits.
+        unsafe {
+            STOP_PTR = Some(stop);
+            let _ = SetConsoleCtrlHandler(Some(handle_ctrl), 1);
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = stop;
-        // On Windows without crates, user closes the console or kills the process.
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 static mut STOP_PTR: Option<Arc<AtomicBool>> = None;
 
 #[cfg(unix)]
@@ -713,4 +800,25 @@ extern "C" {
 #[cfg(unix)]
 unsafe fn libc_signal(sig: i32, handler: extern "C" fn(i32)) {
     let _ = signal(sig, handler);
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn SetConsoleCtrlHandler(
+        handler: Option<unsafe extern "system" fn(u32) -> i32>,
+        add: i32,
+    ) -> i32;
+}
+
+/// CTRL_C_EVENT=0, CTRL_BREAK=1, CTRL_CLOSE=2 — return TRUE if handled.
+#[cfg(windows)]
+unsafe extern "system" fn handle_ctrl(ctrl_type: u32) -> i32 {
+    if matches!(ctrl_type, 0 | 1 | 2) {
+        if let Some(ref s) = STOP_PTR {
+            s.store(true, Ordering::SeqCst);
+        }
+        return 1;
+    }
+    0
 }

@@ -69,6 +69,19 @@ cargo test
 ```
 
 Zero **crates.io** dependencies. Mac UI is system **AppKit** compiled with `clang` (`native/macos/`, `build.rs`).
+
+### Windows (native window portable pack)
+
+```text
+cargo build --release
+powershell -NoProfile -ExecutionPolicy Bypass -File packaging\make-windows-release.ps1
+```
+
+Then open `dist\Interpres-windows\` and double-click **interpres.exe** (or **Open Interpres.bat**).  
+After **Win+Ctrl+L** Live Captions, press **Start listening**.  
+Keep `Get-LiveCaptionsText.ps1` next to `interpres.exe` — the pack includes it.  
+Windows UI is hand-written **Win32** (`src/gui_win.rs`); macOS UI is **AppKit** — same core engine.
+
 ---
 
 ## Common commands

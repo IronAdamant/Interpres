@@ -31,7 +31,8 @@ impl Default for Config {
             remember: false,
             transcript_folder: default_transcript_folder(),
             write_jsonl: false,
-            off_delay_ms: 2500,
+            // LC process detection can blip under load; keep debounce ≥ lifecycle floor.
+            off_delay_ms: 3500,
             poll_ms: 400, // snappier live catch-up
             helper_path: None,
             source: "os".to_string(),

@@ -81,22 +81,38 @@ impl Drop for PluginHost {
 }
 
 /// Resolve helper path: config override, then platform default under helpers/.
+/// On Windows also searches next to `interpres.exe` (portable pack layout).
 pub fn default_helper_path() -> Option<PathBuf> {
     #[cfg(windows)]
     {
-        let p = PathBuf::from("helpers/windows/Get-LiveCaptionsText.ps1");
-        if p.exists() {
-            return Some(p);
-        }
+        return crate::platform::windows::find_uia_helper();
     }
     #[cfg(target_os = "macos")]
     {
-        let p = PathBuf::from("helpers/macos/captions_loop.sh");
-        if p.exists() {
-            return Some(p);
+        let name = "captions_loop.sh";
+        let rel = Path::new("helpers").join("macos").join(name);
+        let mut candidates = Vec::new();
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                candidates.push(dir.join(&rel));
+                candidates.push(dir.join(name));
+            }
         }
+        if let Ok(cwd) = std::env::current_dir() {
+            candidates.push(cwd.join(&rel));
+        }
+        candidates.push(rel);
+        for p in candidates {
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+        return None;
     }
-    None
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        None
+    }
 }
 
 /// Demo helper: emits canned FINAL lines (for tests / no-LC environments).

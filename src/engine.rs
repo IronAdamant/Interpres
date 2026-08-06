@@ -5,7 +5,9 @@ use crate::config::Config;
 use crate::lifecycle::{Lifecycle, LifecycleAction};
 use crate::platform;
 use crate::transcript::{format_clock, TranscriptWriter};
-use crate::ui_labels::{session_open_status, LiveSurfaceTracker, LAG_TIP};
+use crate::ui_labels::{
+    session_open_status, CaptureErrorHysteresis, LiveSurfaceTracker, LAG_TIP,
+};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -19,6 +21,8 @@ pub enum EngineEvent {
     Status(String),
     Live(String),
     Final(String),
+    /// Polished rewrite of the last committed caption family (replace in UI/history).
+    Revised(String),
     Error(String),
     SessionFile(Option<PathBuf>),
     Listening(bool),
@@ -100,6 +104,10 @@ impl CaptureEngine {
         let tx = self.tx.clone();
         let _ = tx.send(EngineEvent::Listening(true));
         let _ = tx.send(EngineEvent::Status(
+            #[cfg(windows)]
+            "Listening… Keep Live Captions open (Win+Ctrl+L) and play audio."
+                .into(),
+            #[cfg(not(windows))]
             "Listening… Turn on Live Captions and play audio.".into(),
         ));
 
@@ -165,7 +173,7 @@ fn run_loop(inner: Arc<EngineInner>, tx: Sender<EngineEvent>) {
     buffer.stable_needed = 2;
     let mut writer: Option<TranscriptWriter> = None;
     let mut session_open = false;
-    let mut err_ticks: u64 = 0;
+    let mut err_hyst = CaptureErrorHysteresis::new();
     let mut surface_tr = LiveSurfaceTracker::new();
     let poll = cfg.poll_ms.max(250);
 
@@ -179,9 +187,7 @@ fn run_loop(inner: Arc<EngineInner>, tx: Sender<EngineEvent>) {
                     "Live Captions detected — {}",
                     snap.detail
                 )));
-                if let Some(ref e) = snap.error {
-                    let _ = tx.send(EngineEvent::Error(e.clone()));
-                }
+                // Do not pin scrape errors on Open — hysteresis handles sticky UI errors.
                 if !session_open {
                     let folder = inner
                         .folder
@@ -246,6 +252,7 @@ fn run_loop(inner: Arc<EngineInner>, tx: Sender<EngineEvent>) {
                 }
                 writer = None;
                 session_open = false;
+                err_hyst = CaptureErrorHysteresis::new();
                 crate::debuglog::set_session_stem(None);
                 let _ = tx.send(EngineEvent::SessionFile(None));
                 let _ = tx.send(EngineEvent::Live(String::new()));
@@ -254,14 +261,26 @@ fn run_loop(inner: Arc<EngineInner>, tx: Sender<EngineEvent>) {
         }
 
         if life.companion_active {
-            if let Some(ref err) = snap.error {
-                err_ticks += 1;
-                if err_ticks == 1 || err_ticks % 15 == 0 {
-                    let _ = tx.send(EngineEvent::Error(err.clone()));
+            let surface_ok = snap.surface_text.as_ref().is_some_and(|s| !s.trim().is_empty());
+            let err_tick = err_hyst.on_poll(surface_ok, snap.error.as_deref());
+            if err_tick.clear_error {
+                // Restore non-error status after a good surface (do not leave UIA error pinned).
+                if let Some(ref wr) = writer {
+                    let _ = tx.send(EngineEvent::Status(session_open_status(
+                        true,
+                        Some(wr.txt_path()),
+                    )));
+                } else {
+                    let _ = tx.send(EngineEvent::Status(
+                        "Listening… Keep Live Captions open and play audio.".into(),
+                    ));
                 }
-            } else {
-                err_ticks = 0;
+            } else if err_tick.show_hard_error {
+                if let Some(ref msg) = err_tick.message {
+                    let _ = tx.send(EngineEvent::Error(msg.clone()));
+                }
             }
+
             if let Some(ref surface) = snap.surface_text {
                 let tick =
                     surface_tr.on_surface(surface, buffer.is_covered(surface));
@@ -290,6 +309,15 @@ fn run_loop(inner: Arc<EngineInner>, tx: Sender<EngineEvent>) {
                             crate::debuglog::log(&format!("FINAL {t}"));
                             let _ = tx.send(EngineEvent::Live(t.clone()));
                             let _ = tx.send(EngineEvent::Final(t.clone()));
+                            if let Some(ref mut w) = writer {
+                                let _ = w.write_final(&format_clock(SystemTime::now()), &t);
+                            }
+                            surface_tr.note_final();
+                        }
+                        BufferEmit::Revised(t) => {
+                            crate::debuglog::log(&format!("REVISED {t}"));
+                            let _ = tx.send(EngineEvent::Live(t.clone()));
+                            let _ = tx.send(EngineEvent::Revised(t.clone()));
                             if let Some(ref mut w) = writer {
                                 let _ = w.write_final(&format_clock(SystemTime::now()), &t);
                             }
@@ -345,6 +373,12 @@ fn flush_buffer(
                 let _ = w.write_final(&format_clock(SystemTime::now()), &t);
             }
         }
+        BufferEmit::Revised(t) => {
+            let _ = tx.send(EngineEvent::Revised(t.clone()));
+            if let Some(w) = writer.as_mut() {
+                let _ = w.write_final(&format_clock(SystemTime::now()), &t);
+            }
+        }
         BufferEmit::Finals(v) => {
             for t in v {
                 let _ = tx.send(EngineEvent::Final(t.clone()));
@@ -353,6 +387,13 @@ fn flush_buffer(
                 }
             }
         }
-        _ => {}
+        // finish() is leave-window settle; Partial must not be dropped if ever returned.
+        BufferEmit::Partial(t) => {
+            let _ = tx.send(EngineEvent::Final(t.clone()));
+            if let Some(w) = writer.as_mut() {
+                let _ = w.write_final(&format_clock(SystemTime::now()), &t);
+            }
+        }
+        BufferEmit::None => {}
     }
 }

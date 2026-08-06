@@ -1,16 +1,31 @@
-//! Native desktop UI entry (macOS AppKit via system clang). Zero crates.io deps.
+//! Native desktop UI entry.
+//! - macOS: AppKit via system clang (`native/macos/`)
+//! - Windows: Win32 via hand-written FFI (`gui_win.rs`)
+//! Shared CaptureEngine core; OS-specific chrome only.
 
+#[cfg(target_os = "macos")]
 use crate::buffer::same_or_refinement;
+#[cfg(target_os = "macos")]
 use crate::config::Config;
+#[cfg(target_os = "macos")]
 use crate::engine::{CaptureEngine, EngineEvent};
+#[cfg(target_os = "macos")]
 use crate::probe;
+#[cfg(target_os = "macos")]
 use crate::ui_labels::{folder_label, remember_toggle_status, session_footer};
+#[cfg(target_os = "macos")]
 use std::ffi::{CStr, CString};
+#[cfg(target_os = "macos")]
 use std::os::raw::{c_char, c_int, c_void};
+#[cfg(target_os = "macos")]
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
 use std::sync::mpsc::{Receiver, TryRecvError};
+#[cfg(target_os = "macos")]
 use std::sync::{Arc, Mutex};
+#[cfg(target_os = "macos")]
 use std::thread;
+#[cfg(target_os = "macos")]
 use std::time::Duration;
 
 #[cfg(target_os = "macos")]
@@ -41,6 +56,7 @@ extern "C" {
     fn interpres_gui_pick_folder(buf: *mut c_char, buflen: c_int) -> c_int;
 }
 
+#[cfg(target_os = "macos")]
 struct GuiState {
     engine: CaptureEngine,
 }
@@ -51,12 +67,14 @@ pub fn run_native_gui() -> i32 {
     {
         return run_macos_gui();
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
     {
-        eprintln!("Native window UI is available on macOS right now.");
-        eprintln!(
-            "On Windows, use: interpres run   (window UI when we build on your Win11 laptop)"
-        );
+        return crate::gui_win::run_windows_gui();
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        eprintln!("Native window UI is available on Windows and macOS.");
+        eprintln!("Use: interpres run");
         1
     }
 }
@@ -122,11 +140,9 @@ fn apply_event(ev: EngineEvent, last_hist: &Arc<Mutex<String>>) {
         EngineEvent::Live(s) => set_live(&s),
         EngineEvent::Final(s) => {
             set_live(&s);
-            // Only append history when this is a new sentence family.
             let mut skip = false;
             if let Ok(mut last) = last_hist.lock() {
                 if !last.is_empty() && same_or_refinement(&last, &s) {
-                    // Keep the better text in memory but do not re-append.
                     if s.len() >= last.len() {
                         *last = s.clone();
                     }
@@ -139,14 +155,19 @@ fn apply_event(ev: EngineEvent, last_hist: &Arc<Mutex<String>>) {
                 append_history(&s);
             }
         }
+        EngineEvent::Revised(s) => {
+            // OS polished an existing family — update live; history keeps one line (Mac append skips same family).
+            set_live(&s);
+            if let Ok(mut last) = last_hist.lock() {
+                *last = s.clone();
+            }
+        }
         EngineEvent::Error(s) => set_status(&format!("⚠ {s}")),
         EngineEvent::SessionFile(Some(p)) => {
             set_session(Some(&p.display().to_string()));
-            // Keep folder label in sync with the file's parent directory.
             if let Some(parent) = p.parent() {
                 set_folder_label(parent);
             }
-            // Session file only exists when Save was ON at session start.
             set_remember_ui(true);
         }
         EngineEvent::SessionFile(None) => {
@@ -178,7 +199,6 @@ fn append_history(s: &str) {
 }
 #[cfg(target_os = "macos")]
 fn set_folder_label(path: &Path) {
-    // Native side prefixes "Folder: "; pass absolute path only (never empty when set).
     let display = folder_label(path);
     let path_only = display
         .strip_prefix("Folder: ")
@@ -200,12 +220,10 @@ fn set_listening(on: bool) {
 }
 #[cfg(target_os = "macos")]
 fn set_session(path: Option<&str>) {
-    // Footer via pure helper: only non-empty when a real session path is active.
     let footer = match path {
         Some(p) if !p.is_empty() => session_footer(Some(Path::new(p))),
         _ => session_footer(None),
     };
-    // Native prefixes "Saving to file: " when path non-empty; pass path only or "".
     let path_only = footer
         .strip_prefix("Saving to file: ")
         .unwrap_or("");
@@ -223,7 +241,6 @@ fn state_from(user: *mut c_void) -> Arc<Mutex<GuiState>> {
 
 #[cfg(target_os = "macos")]
 extern "C" fn cb_ready(user: *mut c_void) {
-    // Window widgets now exist — push config that would have been dropped earlier.
     let state = state_from(user);
     let (folder, remember) = {
         let st = state.lock().unwrap();
@@ -251,7 +268,6 @@ extern "C" fn cb_start(user: *mut c_void) {
     let state = state_from(user);
     {
         let st = state.lock().unwrap();
-        // Refresh labels so folder/save match engine before listen.
         set_folder_label(&st.engine.folder());
         set_remember_ui(st.engine.remember());
         st.engine.start();

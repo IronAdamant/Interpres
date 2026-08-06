@@ -32,6 +32,23 @@ mod tests {
         assert!(len > 1_000, "Interpres.icns too small ({len} bytes)");
     }
 
+    #[test]
+    fn windows_ico_exists_for_exe_icon() {
+        let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/Interpres.ico");
+        assert!(
+            p.is_file(),
+            "expected assets/Interpres.ico for Windows interpres.exe icon"
+        );
+        let len = std::fs::metadata(&p).expect("stat ico").len();
+        assert!(len > 1_000, "Interpres.ico too small ({len} bytes)");
+        let bytes = std::fs::read(&p).expect("read ico");
+        // ICO: reserved=0, type=1
+        assert_eq!(bytes[0], 0);
+        assert_eq!(bytes[1], 0);
+        assert_eq!(bytes[2], 1);
+        assert_eq!(bytes[3], 0);
+    }
+
     /// Guard against reintroducing a light Grok-style watermark in the bottom-right.
     #[test]
     fn logo_bottom_right_is_dark_no_watermark() {
@@ -55,9 +72,23 @@ mod tests {
             "logo.png unexpectedly large ({len}); may still contain watermark baggage"
         );
 
-        // Pixel-level check via `sips` export is unavailable in pure rust without deps.
-        // Drive real decode through Python available on Mac dev machines:
-        let status = std::process::Command::new("python3")
+        // Pixel-level check via Python+PIL when available (Mac/dev). On Windows without
+        // Python, size+magic checks above still guard the shipped asset.
+        let py = ["python3", "python"]
+            .into_iter()
+            .find(|name| {
+                std::process::Command::new(name)
+                    .arg("-c")
+                    .arg("import PIL")
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false)
+            });
+        let Some(py) = py else {
+            // No PIL environment — structural checks already passed.
+            return;
+        };
+        let status = std::process::Command::new(py)
             .args([
                 "-c",
                 r#"
@@ -75,7 +106,7 @@ print("ok", bright)
             ])
             .current_dir(env!("CARGO_MANIFEST_DIR"))
             .status()
-            .expect("spawn python3");
+            .expect("spawn python for logo check");
         assert!(
             status.success(),
             "bottom-right corner still has bright watermark pixels (python check failed)"

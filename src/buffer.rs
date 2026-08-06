@@ -17,9 +17,21 @@ pub struct CaptionBuffer {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BufferEmit {
     None,
+    /// Live edge only — caption still being rewritten by the OS.
     Partial(String),
+    /// New settled sentence (not a polish of something already committed).
     Final(String),
     Finals(Vec<String>),
+    /// OS updated an already-committed sentence family (draft → polish).
+    /// UI should replace the last same-family history line; disk may rewrite last final.
+    Revised(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CommitOutcome {
+    None,
+    New(String),
+    Revised(String),
 }
 
 impl CaptionBuffer {
@@ -37,17 +49,39 @@ impl CaptionBuffer {
     pub fn observe(&mut self, current: &str) -> BufferEmit {
         let current = clean_surface(current);
         if current.is_empty() {
-            return self.flush_partial_if_any(false);
+            // Surface cleared — leave-window finalize everything we still hold.
+            if self.previous.is_empty() {
+                return BufferEmit::None;
+            }
+            let prev = self.previous.clone();
+            let emit = self.diff_emit(&prev, "");
+            self.previous.clear();
+            self.stable_ticks = 0;
+            return emit;
         }
         if current == self.previous {
             self.stable_ticks = self.stable_ticks.saturating_add(1);
-            let last = last_line(&current);
+            let last = last_segment(&current);
             let looks_done = looks_sentence_complete(&last);
-            let need = if looks_done { 1 } else { self.stable_needed };
+            // Incomplete tails need more stability; never force-final tiny fragments.
+            let need = if looks_done {
+                1
+            } else if word_count(&last) < 6 {
+                self.stable_needed.saturating_add(3)
+            } else {
+                self.stable_needed
+            };
             if self.stable_ticks >= need {
-                return self.flush_partial_if_any(looks_done || self.stable_ticks >= 3);
+                // Only force-final incomplete text when it is substantial.
+                let force = looks_done
+                    || (self.stable_ticks >= need.saturating_add(2) && word_count(&last) >= 8);
+                return self.flush_partial_if_any(force);
             }
             if !last.is_empty() && !self.already_covered(&last) {
+                return BufferEmit::Partial(last);
+            }
+            // Covered but OS may still be polishing — surface live edge anyway.
+            if !last.is_empty() {
                 return BufferEmit::Partial(last);
             }
             return BufferEmit::None;
@@ -64,80 +98,153 @@ impl CaptionBuffer {
         self.committed.iter().any(|c| same_or_refinement(c, line))
     }
 
-    /// Public check: is this line (or the last line of a surface) already finalized?
+    /// Public check: is this line (or the last segment of a surface) already finalized?
     pub fn is_covered(&self, text: &str) -> bool {
-        let last = last_line(text);
+        let last = last_segment(text);
         if last.is_empty() {
             return false;
         }
         self.already_covered(&last)
     }
 
-    /// Record a final line. Never re-emits polished rewrites of an already-committed family.
-    fn try_commit(&mut self, line: &str) -> Option<String> {
+    /// Record a final line. Polished rewrites of a committed family → Revised.
+    ///
+    /// `leave_window`: phrase left the rolling surface — allow shorter complete-ish
+    /// utterances ("Wait a second") while still rejecting open stubs ("see the").
+    fn try_commit(&mut self, line: &str, leave_window: bool) -> CommitOutcome {
         let line = line.trim();
         if line.is_empty() || is_junk_line(line) {
-            return None;
+            return CommitOutcome::None;
+        }
+        if !looks_sentence_complete(line) {
+            let wc = word_count(line);
+            if leave_window {
+                // Left the surface: commit short real phrases, not open stubs.
+                if wc < 2 || is_open_phrase_stub(line) {
+                    return CommitOutcome::None;
+                }
+            } else if wc < 5 {
+                // Mid-stream: never finalize tiny incomplete scraps.
+                return CommitOutcome::None;
+            }
         }
         for c in self.committed.iter_mut() {
             if same_or_refinement(c, line) {
-                if line_quality(line) >= line_quality(c) {
+                if line_quality(line) > line_quality(c) {
                     *c = line.to_string();
+                    return CommitOutcome::Revised(line.to_string());
                 }
-                return None;
+                return CommitOutcome::None;
             }
         }
         self.committed.push(line.to_string());
-        Some(line.to_string())
+        CommitOutcome::New(line.to_string())
     }
 
     fn flush_partial_if_any(&mut self, force: bool) -> BufferEmit {
         self.stable_ticks = 0;
-        let last = last_line(&self.previous);
+        let last = last_segment(&self.previous);
         if last.is_empty() {
             return BufferEmit::None;
         }
-        if !force && !looks_sentence_complete(&last) && last.split_whitespace().count() < 5 {
-            return BufferEmit::Partial(last);
+        if !force {
+            // Mid-session soft flush: keep incomplete live edge as PARTIAL only.
+            if !looks_sentence_complete(&last) {
+                return BufferEmit::Partial(last);
+            }
+            return match self.try_commit(&last, false) {
+                CommitOutcome::New(t) => BufferEmit::Final(t),
+                CommitOutcome::Revised(t) => BufferEmit::Revised(t),
+                CommitOutcome::None => BufferEmit::Partial(last),
+            };
         }
-        match self.try_commit(&last) {
-            Some(t) => BufferEmit::Final(t),
-            None => BufferEmit::None,
+        // Session end / forced settle: leave-window rules (short real phrases commit;
+        // open stubs like "see the" still rejected).
+        match self.try_commit(&last, true) {
+            CommitOutcome::New(t) => BufferEmit::Final(t),
+            CommitOutcome::Revised(t) => BufferEmit::Revised(t),
+            CommitOutcome::None => BufferEmit::None,
         }
     }
 
     fn diff_emit(&mut self, prev: &str, curr: &str) -> BufferEmit {
-        let prev_lines: Vec<String> = split_caption_lines(prev);
-        let curr_lines: Vec<String> = split_caption_lines(curr);
+        let prev_lines: Vec<String> = segment_captions(prev);
+        let curr_lines: Vec<String> = segment_captions(curr);
 
         if curr_lines.is_empty() {
-            return BufferEmit::None;
+            // Entire surface cleared — leave-window finalize previous segments.
+            let mut finals = Vec::new();
+            for p in &prev_lines {
+                match self.try_commit(p, true) {
+                    CommitOutcome::New(t) => finals.push(t),
+                    CommitOutcome::Revised(t) => finals.push(t),
+                    CommitOutcome::None => {}
+                }
+            }
+            return match finals.len() {
+                0 => BufferEmit::None,
+                1 => BufferEmit::Final(finals.remove(0)),
+                _ => BufferEmit::Finals(finals),
+            };
         }
 
         let mut finals = Vec::new();
+        let mut revised: Option<String> = None;
 
-        // Lines that left the rolling window → finalize once.
+        // Segments that left the rolling window → finalize once (short phrases OK).
         for p in &prev_lines {
             let still = curr_lines.iter().any(|c| same_or_refinement(c, p));
             if !still {
-                if let Some(t) = self.try_commit(p) {
-                    finals.push(t);
+                match self.try_commit(p, true) {
+                    CommitOutcome::New(t) => finals.push(t),
+                    CommitOutcome::Revised(t) => revised = Some(t),
+                    CommitOutcome::None => {}
                 }
             }
         }
 
-        // Settled rows (all but last) in current surface.
+        // Settled segments (all but last) in current surface — including
+        // complete sentences inside one Windows UIA blob.
         if curr_lines.len() >= 2 {
             for line in &curr_lines[..curr_lines.len() - 1] {
-                if let Some(t) = self.try_commit(line) {
-                    if !finals.iter().any(|f| same_or_refinement(f, &t)) {
-                        finals.push(t);
+                // Settled rows should be complete enough; incomplete mid-segments wait.
+                if !looks_sentence_complete(line) && word_count(line) < 8 {
+                    continue;
+                }
+                match self.try_commit(line, false) {
+                    CommitOutcome::New(t) => {
+                        if !finals.iter().any(|f| same_or_refinement(f, &t)) {
+                            finals.push(t);
+                        }
                     }
+                    CommitOutcome::Revised(t) => revised = Some(t),
+                    CommitOutcome::None => {}
                 }
             }
         }
 
         let last = curr_lines.last().cloned().unwrap_or_default();
+
+        // Live edge growing: if last is a polish of the previous last segment, surface Partial
+        // (or Revised if we already committed that family). Never New-final mid-growth.
+        if let Some(prev_last) = prev_lines.last() {
+            if same_or_refinement(prev_last, &last) && last != *prev_last {
+                match self.try_commit(&last, false) {
+                    CommitOutcome::Revised(t) => {
+                        return BufferEmit::Revised(t);
+                    }
+                    CommitOutcome::New(_) | CommitOutcome::None => {
+                        return BufferEmit::Partial(last);
+                    }
+                }
+            }
+        }
+
+        if let Some(r) = revised {
+            if finals.is_empty() {
+                return BufferEmit::Revised(r);
+            }
+        }
 
         if !finals.is_empty() {
             let mut out = Vec::new();
@@ -156,8 +263,30 @@ impl CaptionBuffer {
         partial_or_none(self, &last)
     }
 
+    /// End of session / LC stop: leave-window commit every held segment (not only last).
     pub fn finish(&mut self) -> BufferEmit {
-        self.flush_partial_if_any(true)
+        self.stable_ticks = 0;
+        if self.previous.is_empty() {
+            return BufferEmit::None;
+        }
+        let segs = segment_captions(&self.previous);
+        self.previous.clear();
+        let mut finals = Vec::new();
+        for p in &segs {
+            match self.try_commit(p, true) {
+                CommitOutcome::New(t) | CommitOutcome::Revised(t) => {
+                    if !finals.iter().any(|f: &String| same_or_refinement(f, &t)) {
+                        finals.push(t);
+                    }
+                }
+                CommitOutcome::None => {}
+            }
+        }
+        match finals.len() {
+            0 => BufferEmit::None,
+            1 => BufferEmit::Final(finals.remove(0)),
+            _ => BufferEmit::Finals(finals),
+        }
     }
 
     pub fn reset(&mut self) {
@@ -167,12 +296,52 @@ impl CaptionBuffer {
     }
 }
 
-fn partial_or_none(buf: &CaptionBuffer, last: &str) -> BufferEmit {
-    if !last.is_empty() && !buf.already_covered(last) {
-        BufferEmit::Partial(last.to_string())
-    } else {
+fn partial_or_none(_buf: &CaptionBuffer, last: &str) -> BufferEmit {
+    if last.is_empty() {
         BufferEmit::None
+    } else {
+        // Always surface the live edge while the OS is still rewriting text.
+        BufferEmit::Partial(last.to_string())
     }
+}
+
+fn word_count(s: &str) -> usize {
+    s.split_whitespace().count()
+}
+
+/// Open LC stubs that must not become FINAL mid-phrase or as tiny leave-window scraps
+/// when a longer same-family line is about to follow.
+fn is_open_phrase_stub(s: &str) -> bool {
+    let l = s.trim().to_ascii_lowercase();
+    if looks_sentence_complete(s) {
+        return false;
+    }
+    matches!(
+        l.as_str(),
+        "see the"
+            | "is that"
+            | "and then"
+            | "so this"
+            | "so this is"
+            | "i think"
+            | "and"
+            | "the"
+            | "so"
+            | "but"
+            | "wait"
+            | "oh"
+            | "yeah"
+            | "yes"
+            | "no"
+            | "um"
+            | "uh"
+    ) || (word_count(s) <= 2
+        && (l.ends_with(" the")
+            || l.ends_with(" a")
+            || l.ends_with(" an")
+            || l.starts_with("and ")
+            || l.starts_with("so ")
+            || l.starts_with("but ")))
 }
 
 fn split_caption_lines(s: &str) -> Vec<String> {
@@ -183,19 +352,86 @@ fn split_caption_lines(s: &str) -> Vec<String> {
         .collect()
 }
 
-fn last_line(s: &str) -> String {
-    split_caption_lines(s).into_iter().last().unwrap_or_default()
+/// Split a continuous Live Captions blob into sentence-like segments.
+/// Windows often returns one growing string without newlines; we still need
+/// draft→polish and “left the window” behaviour per spoken sentence.
+fn split_sentences(s: &str) -> Vec<String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    let chars: Vec<char> = s.chars().collect();
+    let n = chars.len();
+    let mut i = 0usize;
+    while i < n {
+        let c = chars[i];
+        let is_end = c == '.' || c == '?' || c == '!' || c == '…';
+        if is_end {
+            // Avoid splitting decimals / ellipsis mid-number (3.4, 88%).
+            let prev_digit = i > 0 && chars[i - 1].is_ascii_digit();
+            let next_digit = i + 1 < n && chars[i + 1].is_ascii_digit();
+            if c == '.' && prev_digit && next_digit {
+                i += 1;
+                continue;
+            }
+            // Include closing quotes after punct.
+            let mut end = i + 1;
+            while end < n && (chars[end] == '"' || chars[end] == '\u{201d}' || chars[end] == '\'')
+            {
+                end += 1;
+            }
+            let seg: String = chars[start..end].iter().collect::<String>().trim().to_string();
+            if !seg.is_empty() && !is_junk_line(&seg) {
+                out.push(seg);
+            }
+            // Skip spaces after sentence end.
+            i = end;
+            while i < n && chars[i].is_whitespace() {
+                i += 1;
+            }
+            start = i;
+            continue;
+        }
+        i += 1;
+    }
+    if start < n {
+        let seg: String = chars[start..].iter().collect::<String>().trim().to_string();
+        if !seg.is_empty() && !is_junk_line(&seg) {
+            out.push(seg);
+        }
+    }
+    if out.is_empty() && !is_junk_line(s) {
+        out.push(s.to_string());
+    }
+    out
+}
+
+/// Newline rows, then sentence segments (Windows rolling UIA).
+fn segment_captions(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in split_caption_lines(s) {
+        for seg in split_sentences(&line) {
+            out.push(seg);
+        }
+    }
+    out
+}
+
+fn last_segment(s: &str) -> String {
+    segment_captions(s).into_iter().last().unwrap_or_default()
 }
 
 fn clean_surface(s: &str) -> String {
     // Prefer a short tail so we track the live edge, not a giant sticky history blob.
-    let lines = split_caption_lines(s);
-    if lines.is_empty() {
+    let segs = segment_captions(s);
+    if segs.is_empty() {
         return String::new();
     }
-    // Keep last 3 non-junk lines max for diffing (live + recent context).
-    let start = lines.len().saturating_sub(3);
-    lines[start..].join("\n")
+    // Keep last 4 segments for diffing (live + recent settled context).
+    let start = segs.len().saturating_sub(4);
+    segs[start..].join("\n")
 }
 
 /// UI chrome / Finder / control labels that are not spoken captions.
@@ -643,7 +879,7 @@ fn normalize_for_cmp(s: &str) -> String {
         .join(" ")
 }
 
-/// Same spoken line or live rewrite (draft → polish).
+/// Same spoken line or live rewrite (draft → polish / growing LC phrase).
 pub fn same_or_refinement(a: &str, b: &str) -> bool {
     if a.trim() == b.trim() {
         return true;
@@ -656,12 +892,31 @@ pub fn same_or_refinement(a: &str, b: &str) -> bool {
     if na == nb {
         return true;
     }
-    if na.len() >= 10 && nb.len() >= 10 && (na.contains(&nb) || nb.contains(&na)) {
+    // Growing Live Captions phrase: "see the" → "see the problem with…"
+    if na.len() >= 4 && (nb.starts_with(&na) || na.starts_with(&nb)) {
+        return true;
+    }
+    if na.len() >= 8 && nb.len() >= 8 && (na.contains(&nb) || nb.contains(&na)) {
         return true;
     }
 
     let ta: Vec<&str> = na.split_whitespace().collect();
     let tb: Vec<&str> = nb.split_whitespace().collect();
+    // Word-prefix growth (2+ shared leading words, one side extends).
+    if ta.len() >= 2 && tb.len() >= 2 {
+        let pre = ta.len().min(tb.len());
+        let mut shared = 0usize;
+        for i in 0..pre {
+            if ta[i] == tb[i] {
+                shared += 1;
+            } else {
+                break;
+            }
+        }
+        if shared >= 2 && shared == pre && ta.len() != tb.len() {
+            return true;
+        }
+    }
     if ta.len() < 3 || tb.len() < 3 {
         return false;
     }
@@ -872,7 +1127,7 @@ mod tests {
         let mut b = CaptionBuffer::new();
         for _ in 0..5 {
             match b.observe("Correct Spelling Automatically") {
-                BufferEmit::Final(_) | BufferEmit::Finals(_) => {
+                BufferEmit::Final(_) | BufferEmit::Finals(_) | BufferEmit::Revised(_) => {
                     panic!("must not finalize chrome")
                 }
                 BufferEmit::Partial(t) => {
@@ -973,5 +1228,221 @@ mod tests {
             BufferEmit::Partial(t) => assert!(t.contains("Hello")),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn growing_phrase_is_refinement_not_new_finals() {
+        // Windows LC often extends one incomplete phrase in place.
+        assert!(same_or_refinement("see the", "see the problem with being the most valuable"));
+        assert!(same_or_refinement(
+            "is that",
+            "is that to stay there? You need more customers"
+        ));
+        let mut b = CaptionBuffer::new();
+        b.stable_needed = 2;
+        let _ = b.observe("see the");
+        let _ = b.observe("see the");
+        // Must not finalize tiny incomplete scraps.
+        match b.observe("see the") {
+            BufferEmit::Final(t) => panic!("premature final: {t}"),
+            BufferEmit::Finals(v) => panic!("premature finals: {v:?}"),
+            _ => {}
+        }
+        let mut saw_partial = false;
+        for s in [
+            "see the problem with being the most valuable company on the planet",
+            "see the problem with being the most valuable company on the planet.",
+        ] {
+            match b.observe(s) {
+                BufferEmit::Partial(t) => {
+                    saw_partial = true;
+                    assert!(t.contains("problem") || t.contains("see the"));
+                }
+                BufferEmit::Final(t) => {
+                    assert!(t.contains("problem") || t.contains("planet"), "{t}");
+                }
+                BufferEmit::Revised(t) => {
+                    assert!(t.contains("problem") || t.contains("planet"), "{t}");
+                }
+                BufferEmit::Finals(_) => {}
+                BufferEmit::None => {}
+            }
+        }
+        // Complete sentence with period should settle without leaving "see the" alone.
+        let _ = b.observe("see the problem with being the most valuable company on the planet.");
+        let _ = b.observe("see the problem with being the most valuable company on the planet.");
+        assert!(
+            !b.committed.iter().any(|c| c.trim() == "see the"),
+            "committed={:?}",
+            b.committed
+        );
+        let _ = saw_partial;
+    }
+
+    #[test]
+    fn windows_blob_segments_and_revises_polish() {
+        let mut b = CaptionBuffer::new();
+        b.stable_needed = 1;
+        let draft = "Apple needs you to buy it. I don't know if you noticed";
+        let polished =
+            "Apple needs you to buy it. I don't know if you've noticed or not, but everyone has an iPhone.";
+        let _ = b.observe(draft);
+        let _ = b.observe(draft);
+        // Grow / polish second sentence while first stays.
+        match b.observe(polished) {
+            BufferEmit::Partial(t) => assert!(t.contains("iPhone") || t.contains("noticed")),
+            BufferEmit::Revised(t) => assert!(t.contains("noticed") || t.contains("iPhone")),
+            BufferEmit::Final(t) => assert!(!t.is_empty()),
+            BufferEmit::Finals(v) => assert!(!v.is_empty()),
+            BufferEmit::None => {}
+        }
+        // First sentence should be one family at most in committed when settled.
+        let first_family = b
+            .committed
+            .iter()
+            .filter(|c| c.contains("Apple needs you to buy it"))
+            .count();
+        assert!(first_family <= 1, "committed={:?}", b.committed);
+    }
+
+    /// Field pack 2026-08-06_07-00-16: growing first line, then short "Wait a second", then next sentence.
+    #[test]
+    fn field_session_wait_a_second_not_lost_and_no_stub_finals() {
+        let mut b = CaptionBuffer::new();
+        b.stable_needed = 2;
+
+        // Growing first utterance (Windows-style single rolling string with commas).
+        let s1 = "so this is so this just arrived in the post today, the snap maker you won and it has a hole in the side so I hope that's not broken.";
+        let _ = b.observe("so this is");
+        let _ = b.observe("so this is so this just arrived in the post today");
+        let _ = b.observe(s1);
+        let _ = b.observe(s1);
+        let _ = b.observe(s1);
+
+        // Short phrase appears as live edge (appended after period → new segment).
+        let with_wait = format!("{s1} Wait a second");
+        match b.observe(&with_wait) {
+            BufferEmit::Partial(t) => assert!(
+                t.to_ascii_lowercase().contains("wait"),
+                "live edge should be Wait… got {t}"
+            ),
+            other => panic!("expected Partial for Wait a second, got {other:?}"),
+        }
+
+        // Next unrelated phrase replaces Wait — leave-window should commit "Wait a second".
+        let next = format!("{s1} And apparently this has to be done differently for tool heads.");
+        let mut got_wait_final = false;
+        match b.observe(&next) {
+            BufferEmit::Final(t) | BufferEmit::Revised(t) => {
+                if t.to_ascii_lowercase().contains("wait") {
+                    got_wait_final = true;
+                }
+            }
+            BufferEmit::Finals(v) => {
+                got_wait_final = v.iter().any(|t| t.to_ascii_lowercase().contains("wait"));
+            }
+            BufferEmit::Partial(_) | BufferEmit::None => {}
+        }
+        // Either committed now or still as partial until finish; must not leave silently with no trace.
+        let wait_in_committed = b
+            .committed
+            .iter()
+            .any(|c| c.to_ascii_lowercase().contains("wait a second"));
+        assert!(
+            got_wait_final || wait_in_committed,
+            "Wait a second must be finalized on leave-window; committed={:?} got_wait={got_wait_final}",
+            b.committed
+        );
+
+        // Growing stub "see the" → longer phrase must not leave a lone "see the" FINAL.
+        let mut b2 = CaptionBuffer::new();
+        b2.stable_needed = 2;
+        for _ in 0..4 {
+            let _ = b2.observe("see the");
+        }
+        assert!(
+            !b2.committed.iter().any(|c| c.trim() == "see the"),
+            "must not final stub see the; committed={:?}",
+            b2.committed
+        );
+        let full = "see the problem with being the most valuable company on the planet.";
+        for _ in 0..3 {
+            let _ = b2.observe(full);
+        }
+        assert!(
+            !b2.committed.iter().any(|c| c.trim() == "see the"),
+            "after growth still no lone stub; committed={:?}",
+            b2.committed
+        );
+    }
+
+    #[test]
+    fn open_phrase_stubs_detected() {
+        assert!(is_open_phrase_stub("see the"));
+        assert!(is_open_phrase_stub("is that"));
+        assert!(!is_open_phrase_stub("Wait a second"));
+        assert!(!is_open_phrase_stub("I think that's right."));
+    }
+
+    /// Session end must commit short real live-edge phrases (not drop as Partial).
+    #[test]
+    fn finish_commits_wait_a_second_not_stub() {
+        let mut b = CaptionBuffer::new();
+        b.stable_needed = 2;
+        let _ = b.observe("Wait a second");
+        let _ = b.observe("Wait a second");
+        match b.finish() {
+            BufferEmit::Final(t) => assert!(
+                t.to_ascii_lowercase().contains("wait a second"),
+                "got {t}"
+            ),
+            other => panic!("finish must Final short real phrase, got {other:?}"),
+        }
+        assert!(
+            b.committed
+                .iter()
+                .any(|c| c.to_ascii_lowercase().contains("wait a second"))
+        );
+
+        // Open stubs still rejected on finish.
+        let mut b2 = CaptionBuffer::new();
+        let _ = b2.observe("see the");
+        let _ = b2.observe("see the");
+        match b2.finish() {
+            BufferEmit::None => {}
+            BufferEmit::Final(t) | BufferEmit::Revised(t) | BufferEmit::Partial(t) => {
+                panic!("must not commit stub on finish: {t}")
+            }
+            BufferEmit::Finals(v) => panic!("must not commit stubs: {v:?}"),
+        }
+        assert!(
+            !b2.committed.iter().any(|c| c.trim() == "see the"),
+            "committed={:?}",
+            b2.committed
+        );
+    }
+
+    /// Empty surface observe must leave-window finalize short real phrases in previous.
+    #[test]
+    fn empty_surface_leave_window_commits_short_phrase() {
+        let mut b = CaptionBuffer::new();
+        let _ = b.observe("Wait a second");
+        match b.observe("") {
+            BufferEmit::Final(t) => assert!(
+                t.to_ascii_lowercase().contains("wait"),
+                "got {t}"
+            ),
+            BufferEmit::Finals(v) => assert!(
+                v.iter().any(|t| t.to_ascii_lowercase().contains("wait")),
+                "{v:?}"
+            ),
+            other => panic!("empty surface must leave-window Final, got {other:?}"),
+        }
+        assert!(b.previous.is_empty());
+        assert!(
+            b.committed
+                .iter()
+                .any(|c| c.to_ascii_lowercase().contains("wait a second"))
+        );
     }
 }

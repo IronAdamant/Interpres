@@ -7,7 +7,7 @@ mod signals;
 pub mod macos;
 
 #[cfg(windows)]
-mod windows;
+pub mod windows;
 
 pub use detect::{live_captions_present, LiveCaptionsPresence};
 pub use signals::{macos_signals, windows_signals, SignalTable};

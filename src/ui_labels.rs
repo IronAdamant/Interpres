@@ -93,6 +93,84 @@ pub fn should_show_lag_tip(ticks: u64) -> bool {
     ticks == LAG_TIP_AFTER_STALE_TICKS
 }
 
+/// Consecutive failed capture polls before the UI shows a hard scrape error.
+/// Transient PowerShell/UIA failures must not pin Status while captions still flow.
+pub const CAPTURE_ERROR_SHOW_AFTER: u32 = 4;
+
+/// Pure hysteresis for capture/scrape errors (testable without engine threads).
+///
+/// - A good surface clears the failure streak and hides hard error.
+/// - Failures increment the streak; hard error only after `CAPTURE_ERROR_SHOW_AFTER`.
+/// - Optional `error_message` is returned only when the hard error should be shown.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CaptureErrorHysteresis {
+    consecutive_failures: u32,
+    showing_hard_error: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CaptureErrorTick {
+    /// Show a hard scrape/UIA error in Status (sticky until a good surface).
+    pub show_hard_error: bool,
+    /// Message to display when `show_hard_error` (last failure text).
+    pub message: Option<String>,
+    /// Clear prior error UI after a successful surface.
+    pub clear_error: bool,
+}
+
+impl CaptureErrorHysteresis {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn consecutive_failures(&self) -> u32 {
+        self.consecutive_failures
+    }
+
+    pub fn showing_hard_error(&self) -> bool {
+        self.showing_hard_error
+    }
+
+    /// One poll outcome: `surface_ok` true when caption surface text was obtained.
+    pub fn on_poll(&mut self, surface_ok: bool, error: Option<&str>) -> CaptureErrorTick {
+        if surface_ok {
+            let clear = self.showing_hard_error || self.consecutive_failures > 0;
+            self.consecutive_failures = 0;
+            self.showing_hard_error = false;
+            return CaptureErrorTick {
+                show_hard_error: false,
+                message: None,
+                clear_error: clear,
+            };
+        }
+        // No surface this tick.
+        if error.is_some() {
+            self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        } else {
+            // Empty surface without error (LC idle / junk filtered) — do not accumulate scrape errors.
+            return CaptureErrorTick {
+                show_hard_error: self.showing_hard_error,
+                message: None,
+                clear_error: false,
+            };
+        }
+        if self.consecutive_failures >= CAPTURE_ERROR_SHOW_AFTER {
+            self.showing_hard_error = true;
+            CaptureErrorTick {
+                show_hard_error: true,
+                message: error.map(|s| s.to_string()),
+                clear_error: false,
+            }
+        } else {
+            CaptureErrorTick {
+                show_hard_error: false,
+                message: None,
+                clear_error: false,
+            }
+        }
+    }
+}
+
 /// Pure live-surface poll tracker used by the capture engine (testable without AX/threads).
 ///
 /// `empty_ticks` is **not** shared with `stale_ticks`: after a long covered surface
@@ -169,6 +247,41 @@ impl LiveSurfaceTracker {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn capture_error_hysteresis_clears_on_success_and_needs_streak() {
+        let mut h = CaptureErrorHysteresis::new();
+        // Single failure must not show hard error.
+        let t1 = h.on_poll(false, Some("UIA text scrape failed (helper…)"));
+        assert!(!t1.show_hard_error);
+        assert!(!t1.clear_error);
+        assert_eq!(h.consecutive_failures(), 1);
+
+        // Still under threshold
+        for _ in 0..2 {
+            let t = h.on_poll(false, Some("UIA text scrape failed"));
+            assert!(!t.show_hard_error);
+        }
+        assert_eq!(h.consecutive_failures(), 3);
+
+        // Cross threshold
+        let t_hard = h.on_poll(false, Some("UIA text scrape failed (helper at path)"));
+        assert!(t_hard.show_hard_error);
+        assert!(t_hard.message.as_ref().unwrap().contains("UIA"));
+        assert!(h.showing_hard_error());
+
+        // Success surface clears sticky error
+        let t_ok = h.on_poll(true, None);
+        assert!(!t_ok.show_hard_error);
+        assert!(t_ok.clear_error);
+        assert_eq!(h.consecutive_failures(), 0);
+        assert!(!h.showing_hard_error());
+
+        // Empty without error does not accumulate
+        let t_empty = h.on_poll(false, None);
+        assert!(!t_empty.show_hard_error);
+        assert_eq!(h.consecutive_failures(), 0);
+    }
 
     #[test]
     fn folder_label_shows_absolute_path_when_set() {
