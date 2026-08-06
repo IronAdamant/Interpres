@@ -299,6 +299,13 @@ void interpres_gui_append_history(const char *line) {
     });
 }
 
+void interpres_gui_clear_history(void) {
+    on_main(^{
+      if (g_history)
+          [g_history setString:@""];
+    });
+}
+
 void interpres_gui_set_folder(const char *path) {
     if (!path)
         path = "";

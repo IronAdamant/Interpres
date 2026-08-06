@@ -436,8 +436,8 @@ fn clean_surface(s: &str) -> String {
     if segs.is_empty() {
         return String::new();
     }
-    // Keep last 4 segments for diffing (live + recent settled context).
-    let start = segs.len().saturating_sub(4);
+    // Last 6 segments: multi-line Mac LC window + growth without dropping short siblings.
+    let start = segs.len().saturating_sub(6);
     segs[start..].join("\n")
 }
 
@@ -709,41 +709,242 @@ fn has_long_lowercase_content(s: &str) -> bool {
     })
 }
 
-/// Pure surface pick used by AX scrape: drop junk-only input; prefer speech-like lines.
-/// Returns `None` when every candidate is chrome/empty (never promote junk as caption).
-pub fn pick_caption_surface<'a, I>(raw: I) -> Option<String>
+/// Max speech lines joined into one synthetic multi-line surface (Mac multi-node AX).
+const MERGE_SURFACE_MAX_LINES: usize = 6;
+
+/// Polls to retain short complete speech that may vanish before leave-window.
+pub const SHORT_LINE_HOLD_POLLS: u32 = 4;
+
+/// Rank speech-eligible candidates high→low for pick + debug (score, text).
+/// Drops junk/empty; does not merge.
+pub fn rank_caption_candidates<'a, I>(raw: I) -> Vec<(i64, String)>
 where
     I: IntoIterator<Item = &'a str>,
 {
-    let mut best: Option<(i64, String)> = None;
+    let mut ranked: Vec<(i64, String)> = Vec::new();
     for s in raw {
         let trimmed = clean_surface(s);
-        if trimmed.is_empty() {
-            continue;
-        }
-        // clean_surface already drops junk lines; whole-string junk never scores.
-        if is_junk_line(&trimmed) {
+        if trimmed.is_empty() || is_junk_line(&trimmed) {
             continue;
         }
         let sc = score_caption_candidate(&trimmed);
         if sc <= 0 {
             continue;
         }
-        match &best {
-            None => best = Some((sc, trimmed)),
-            Some((bsc, btxt)) => {
-                let bw = btxt.split_whitespace().count();
-                let tw = trimmed.split_whitespace().count();
-                // Prefer higher score; within 15% prefer more words (fuller live line).
-                if sc > *bsc
-                    || (sc * 100 >= *bsc * 85 && (tw > bw || (tw == bw && trimmed.len() > btxt.len())))
-                {
-                    best = Some((sc, trimmed));
-                }
+        ranked.push((sc, trimmed));
+    }
+    ranked.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| b.1.len().cmp(&a.1.len()))
+            .then_with(|| a.1.cmp(&b.1))
+    });
+    // Dedupe exact strings keeping best score (already sorted).
+    let mut out = Vec::new();
+    for (sc, t) in ranked {
+        if out.iter().any(|(_, u): &(i64, String)| u == &t) {
+            continue;
+        }
+        out.push((sc, t));
+    }
+    out
+}
+
+/// Pure surface pick used by AX scrape: drop junk-only input; prefer speech-like lines.
+///
+/// When multiple speech nodes exist (macOS Live Captions multi-line), **merge** short
+/// complete siblings with the best long line so leave-window can finalize them.
+/// Returns `None` when every candidate is chrome/empty (never promote junk as caption).
+pub fn pick_caption_surface<'a, I>(raw: I) -> Option<String>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let ranked = rank_caption_candidates(raw);
+    merge_ranked_caption_surface(&ranked)
+}
+
+/// Merge ranked speech candidates into one multi-line surface (or single best line).
+pub fn merge_ranked_caption_surface(ranked: &[(i64, String)]) -> Option<String> {
+    if ranked.is_empty() {
+        return None;
+    }
+
+    // Prefer an existing multi-segment blob when present (boost by segment count).
+    let mut best_multi: Option<(i64, &str)> = None;
+    for (sc, t) in ranked {
+        let n = segment_captions(t).len();
+        if n >= 2 {
+            let boost = *sc + (n as i64) * 80;
+            if best_multi
+                .as_ref()
+                .map(|(b, _)| boost > *b)
+                .unwrap_or(true)
+            {
+                best_multi = Some((boost, t.as_str()));
             }
         }
     }
-    best.map(|(_, t)| t)
+
+    // Primary = best incomplete (live growth) if any, else best multi-blob, else top score.
+    let primary = ranked
+        .iter()
+        .find(|(_, t)| {
+            let last = last_segment(t);
+            !looks_sentence_complete(&last) && word_count(&last) >= 3 && !is_open_phrase_stub(&last)
+        })
+        .map(|(_, t)| t.clone())
+        .or_else(|| best_multi.map(|(_, t)| t.to_string()))
+        .unwrap_or_else(|| ranked[0].1.clone());
+    let best_sc = ranked[0].0;
+
+    let mut lines: Vec<String> = Vec::new();
+    // Completed short siblings first (session leave-window), live primary last.
+    for (sc, t) in ranked {
+        if *sc * 100 < best_sc * 35 {
+            continue;
+        }
+        for seg in segment_captions(t) {
+            if is_holdable_short_speech(&seg)
+                || (looks_sentence_complete(&seg) && word_count(&seg) >= 2 && word_count(&seg) <= 20)
+            {
+                // Skip segments that are the live primary edge (added last).
+                let prim_last = last_segment(&primary);
+                if same_or_refinement(&seg, &prim_last) || same_or_refinement(&prim_last, &seg) {
+                    continue;
+                }
+                push_unique_speech_line(&mut lines, seg);
+            }
+        }
+    }
+    for seg in segment_captions(&primary) {
+        push_unique_speech_line(&mut lines, seg);
+    }
+
+    if lines.is_empty() {
+        return Some(primary);
+    }
+    // Cap: keep last N lines (live edge = last segment of primary).
+    let start = lines.len().saturating_sub(MERGE_SURFACE_MAX_LINES);
+    let joined = lines[start..].join("\n");
+    if joined.is_empty() {
+        None
+    } else {
+        Some(joined)
+    }
+}
+
+fn push_unique_speech_line(lines: &mut Vec<String>, seg: String) {
+    let seg = seg.trim().to_string();
+    if seg.is_empty() || is_junk_line(&seg) {
+        return;
+    }
+    for existing in lines.iter_mut() {
+        if same_or_refinement(existing, &seg) {
+            if line_quality(&seg) > line_quality(existing) {
+                *existing = seg;
+            }
+            return;
+        }
+    }
+    lines.push(seg);
+}
+
+/// Short complete (or substantial) speech worth retaining across a poll or two.
+pub fn is_holdable_short_speech(s: &str) -> bool {
+    let s = s.trim();
+    if s.is_empty() || is_junk_line(s) || is_open_phrase_stub(s) {
+        return false;
+    }
+    let wc = word_count(s);
+    if wc < 2 || wc > 16 {
+        return false;
+    }
+    // Complete short sentences always; incomplete only if substantial (not stubs).
+    looks_sentence_complete(s) || wc >= 4
+}
+
+/// Extract holdable short speech segments from raw candidate strings.
+pub fn extract_holdable_shorts<'a, I>(raw: I) -> Vec<String>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let mut out = Vec::new();
+    for s in raw {
+        for seg in segment_captions(&clean_surface(s)) {
+            if is_holdable_short_speech(&seg) {
+                push_unique_speech_line(&mut out, seg);
+            }
+        }
+    }
+    out
+}
+
+/// Holds short complete speech across a few polls so leave-window can commit them
+/// when the next AX surface is only the long growing line.
+#[derive(Clone, Debug, Default)]
+pub struct ShortLineHold {
+    items: Vec<(String, u32)>,
+}
+
+impl ShortLineHold {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Ingest candidates/surface segments; drop covered or expired; return active holds.
+    pub fn on_poll(
+        &mut self,
+        candidates: &[String],
+        is_covered: impl Fn(&str) -> bool,
+    ) -> Vec<String> {
+        for (_, life) in &mut self.items {
+            *life = life.saturating_sub(1);
+        }
+        self.items.retain(|(t, life)| *life > 0 && !is_covered(t));
+
+        for c in candidates {
+            for seg in segment_captions(&clean_surface(c)) {
+                if !is_holdable_short_speech(&seg) || is_covered(&seg) {
+                    continue;
+                }
+                if let Some(pos) = self.items.iter().position(|(t, _)| {
+                    same_or_refinement(t, &seg) || same_or_refinement(&seg, t)
+                }) {
+                    let (ref mut t, ref mut life) = self.items[pos];
+                    *life = SHORT_LINE_HOLD_POLLS;
+                    if line_quality(&seg) > line_quality(t) {
+                        *t = seg;
+                    }
+                } else {
+                    self.items.push((seg, SHORT_LINE_HOLD_POLLS));
+                }
+            }
+        }
+        if self.items.len() > MERGE_SURFACE_MAX_LINES {
+            let drain = self.items.len() - MERGE_SURFACE_MAX_LINES;
+            self.items.drain(0..drain);
+        }
+        self.items.iter().map(|(t, _)| t.clone()).collect()
+    }
+
+    /// Prepend held shorts not already present in surface (live edge stays last).
+    pub fn inject_into_surface(&self, surface: &str) -> String {
+        let mut lines: Vec<String> = Vec::new();
+        for (t, _) in &self.items {
+            push_unique_speech_line(&mut lines, t.clone());
+        }
+        for seg in segment_captions(&clean_surface(surface)) {
+            push_unique_speech_line(&mut lines, seg);
+        }
+        if lines.is_empty() {
+            return surface.to_string();
+        }
+        let start = lines.len().saturating_sub(MERGE_SURFACE_MAX_LINES);
+        lines[start..].join("\n")
+    }
+
+    pub fn clear(&mut self) {
+        self.items.clear();
+    }
 }
 
 fn score_caption_candidate(s: &str) -> i64 {
@@ -751,15 +952,18 @@ fn score_caption_candidate(s: &str) -> i64 {
         return -1_000_000;
     }
     let mut best_line = 0i64;
+    let mut line_n = 0i64;
     for line in s.lines() {
         let t = line.trim();
         if t.is_empty() || is_junk_line(t) {
             continue;
         }
+        line_n += 1;
         best_line = best_line.max(score_one_caption_line(t));
     }
+    // Multi-line caption blocks beat single longest line for Mac multi-node merge.
     if best_line > 0 {
-        return best_line + s.lines().count() as i64;
+        return best_line + line_n * 50 + s.lines().count() as i64;
     }
     score_one_caption_line(s)
 }
@@ -779,6 +983,15 @@ fn score_one_caption_line(s: &str) -> i64 {
     }
     if s.contains('.') || s.contains('?') || s.contains('!') {
         score += 30;
+    }
+    // Boost short complete speech so multi-line siblings are not discarded vs long partials.
+    if looks_sentence_complete(s) && words >= 2 && words <= 12 && !is_open_phrase_stub(s) {
+        score += 70;
+    }
+    // Prefer growing / incomplete speech over sticky completed AX lines still in the tree.
+    // (Mac Live Captions often leaves old finished sentences in the accessibility graph.)
+    if !looks_sentence_complete(s) && words >= 3 && !is_open_phrase_stub(s) {
+        score += 120;
     }
     let lower = s.to_ascii_lowercase();
     // Only penalize Finder/spelling chrome — not ordinary speech starting with "show ".
@@ -1489,5 +1702,167 @@ mod tests {
                 .iter()
                 .any(|c| c.to_ascii_lowercase().contains("wait a second"))
         );
+    }
+
+    #[test]
+    fn pick_merges_short_and_long_speech_lines() {
+        let cands = [
+            "First model just dropped.",
+            "That is competitive with the best models on the planet",
+        ];
+        let picked = pick_caption_surface(cands.iter().copied()).expect("pick");
+        let low = picked.to_ascii_lowercase();
+        assert!(
+            low.contains("first model just dropped"),
+            "short sibling must merge into surface: {picked:?}"
+        );
+        assert!(
+            low.contains("competitive with the best models"),
+            "long line must remain: {picked:?}"
+        );
+    }
+
+    #[test]
+    fn pick_prefers_multiline_blob_over_single_long() {
+        let multi = "It's free.\nYou can download it right now, and that's not even the most impressive part.";
+        let cands = [
+            "You can download it right now, and that's not even the most impressive part.",
+            multi,
+        ];
+        let picked = pick_caption_surface(cands.iter().copied()).expect("pick");
+        let low = picked.to_ascii_lowercase();
+        assert!(
+            low.contains("it's free") || low.contains("its free"),
+            "multi-line blob must keep short line: {picked:?}"
+        );
+    }
+
+    #[test]
+    fn pick_still_rejects_junk_only() {
+        assert_eq!(
+            pick_caption_surface(
+                [
+                    "Correct Spelling Automatically",
+                    "system floating window",
+                    "Show “x.md” in Finder",
+                ]
+                .iter()
+                .copied()
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn rank_caption_candidates_orders_by_score() {
+        let ranked = rank_caption_candidates(
+            [
+                "Hi",
+                "That is competitive with the best models on the planet.",
+                "It's free.",
+            ]
+            .iter()
+            .copied(),
+        );
+        assert!(!ranked.is_empty());
+        assert!(ranked[0].0 >= ranked.last().unwrap().0);
+        assert!(ranked.iter().any(|(_, t)| t.contains("competitive")));
+    }
+
+    #[test]
+    fn short_line_hold_survives_next_long_only_surface() {
+        let mut hold = ShortLineHold::new();
+        let mut b = CaptionBuffer::new();
+        b.stable_needed = 1;
+
+        // Poll N: only short complete speech.
+        let shorts = vec!["It's free.".to_string()];
+        let _ = hold.on_poll(&shorts, |t| b.is_covered(t));
+        let s1 = hold.inject_into_surface("It's free.");
+        let _ = b.observe(&s1);
+        let _ = b.observe(&s1); // stable → may final short
+
+        // Poll N+1: only long download line — hold injects short if not covered.
+        let long = "You can download it right now, and that's not even the most impressive part.";
+        let _ = hold.on_poll(&[long.to_string()], |t| b.is_covered(t));
+        let s2 = hold.inject_into_surface(long);
+        // Force leave-window by observing long-only after multi, or multi with short+long.
+        let _ = b.observe(&s2);
+        let _ = b.observe(long);
+        let _ = b.observe(long);
+
+        let free_ok = b
+            .committed
+            .iter()
+            .any(|c| c.to_ascii_lowercase().contains("free"));
+        // If not yet committed, finish must still have held short in previous via inject path.
+        if !free_ok {
+            let s3 = hold.inject_into_surface("");
+            match b.observe(&s3) {
+                BufferEmit::Final(t) | BufferEmit::Revised(t) => {
+                    assert!(t.to_ascii_lowercase().contains("free"), "{t}");
+                }
+                BufferEmit::Finals(v) => {
+                    assert!(
+                        v.iter().any(|t| t.to_ascii_lowercase().contains("free")),
+                        "{v:?}"
+                    );
+                }
+                other => panic!("expected free final via hold, committed={:?} other={other:?}", b.committed),
+            }
+        }
+    }
+
+    /// Field pack IMG_6507: short LC lines must not be lost when multi-line surfaces are fed.
+    #[test]
+    fn field_img6507_short_lines_not_lost() {
+        let mut b = CaptionBuffer::new();
+        b.stable_needed = 1;
+
+        let sequence = [
+            "A brand new open source.",
+            "First model just dropped.\nThat is competitive with the best mod",
+            "First model just dropped.\nThat is competitive with the best models on the planet.",
+            "That is competitive with the best models on the planet.\nIt's free.\nyou can download it right now",
+            "You can download it right now, and that's not even the most impressive part.\nTake a look at this trailer.",
+            "Take a look at this trailer.\nIt paints such an optimistic and really simple vision of what the future of artificial intelligence can be.",
+            "It paints such an optimistic and really simple vision of what the future of artificial intelligence can be.\nA guy going fishing while AI's doing work for him.",
+            "Here's another one playing tennis while AI is doing scientific research, bouldering while putting together spreadsheets.",
+        ];
+
+        for s in sequence {
+            let _ = b.observe(s);
+            let _ = b.observe(s); // stability ticks
+        }
+        // Leave-window remainder.
+        let _ = b.finish();
+
+        let committed = b.committed.join("\n").to_ascii_lowercase();
+        for must in [
+            "first model just dropped",
+            "it's free",
+            "take a look at this trailer",
+            "guy going fishing",
+        ] {
+            assert!(
+                committed.contains(must),
+                "missing {must:?} in committed={:?}",
+                b.committed
+            );
+        }
+        assert!(
+            !b.committed.iter().any(|c| c.trim() == "see the"),
+            "must not commit stubs"
+        );
+    }
+
+    #[test]
+    fn holdable_short_speech_helpers() {
+        assert!(is_holdable_short_speech("It's free."));
+        assert!(is_holdable_short_speech("First model just dropped."));
+        assert!(is_holdable_short_speech("Take a look at this trailer."));
+        assert!(!is_holdable_short_speech("see the"));
+        assert!(!is_holdable_short_speech("and"));
+        assert!(!is_holdable_short_speech("Correct Spelling Automatically"));
     }
 }

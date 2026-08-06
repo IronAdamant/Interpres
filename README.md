@@ -107,6 +107,8 @@ Only **demo** mode (sample file). Real capture always needs OS Live Captions.
 
 Strict **zero crates.io** dependencies. Native UI: **AppKit** on Mac, **Win32** on Windows. Same core engine.
 
+Default capture poll is **150ms** (`poll_ms` in settings) so short Live Captions lines are less likely to vanish between samples. Lower = snappier / more CPU. Debug mode logs top AX/speech candidates vs the merged surface pick.
+
 ```text
 cargo test
 cargo build --release

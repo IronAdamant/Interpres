@@ -1,6 +1,6 @@
 //! Background Live Captions capture engine (pure std). Used by GUI and CLI.
 
-use crate::buffer::{live_edge_phrase, BufferEmit, CaptionBuffer};
+use crate::buffer::{live_edge_phrase, BufferEmit, CaptionBuffer, ShortLineHold};
 use crate::config::Config;
 use crate::lifecycle::{Lifecycle, LifecycleAction};
 use crate::platform;
@@ -102,7 +102,10 @@ impl CaptureEngine {
         self.inner.stop.store(false, Ordering::SeqCst);
         let inner = self.inner.clone();
         let tx = self.tx.clone();
+        // Order: Listening(true) first so UI clears Session/Live before new finals arrive.
         let _ = tx.send(EngineEvent::Listening(true));
+        let _ = tx.send(EngineEvent::Live(String::new()));
+        let _ = tx.send(EngineEvent::SessionFile(None));
         let _ = tx.send(EngineEvent::Status(
             crate::ui_labels::listening_status().into(),
         ));
@@ -171,7 +174,10 @@ fn run_loop(inner: Arc<EngineInner>, tx: Sender<EngineEvent>) {
     let mut session_open = false;
     let mut err_hyst = CaptureErrorHysteresis::new();
     let mut surface_tr = LiveSurfaceTracker::new();
-    let poll = cfg.poll_ms.max(250);
+    let mut short_hold = ShortLineHold::new();
+    let mut last_live_edge = String::new();
+    // Floor 100ms so config can go lower; default is 150 (short-line fidelity).
+    let poll = cfg.poll_ms.max(100);
 
     while !inner.stop.load(Ordering::SeqCst) {
         let snap = platform::poll_capture();
@@ -229,6 +235,8 @@ fn run_loop(inner: Arc<EngineInner>, tx: Sender<EngineEvent>) {
                             session_open = true;
                             buffer.reset();
                             surface_tr.reset();
+                            short_hold.clear();
+                            last_live_edge.clear();
                         }
                         Err(e) => {
                             let _ = tx.send(EngineEvent::Error(format!(
@@ -249,6 +257,8 @@ fn run_loop(inner: Arc<EngineInner>, tx: Sender<EngineEvent>) {
                 writer = None;
                 session_open = false;
                 err_hyst = CaptureErrorHysteresis::new();
+                short_hold.clear();
+                last_live_edge.clear();
                 crate::debuglog::set_session_stem(None);
                 let _ = tx.send(EngineEvent::SessionFile(None));
                 let _ = tx.send(EngineEvent::Live(String::new()));
@@ -277,9 +287,18 @@ fn run_loop(inner: Arc<EngineInner>, tx: Sender<EngineEvent>) {
                 }
             }
 
-            if let Some(ref surface) = snap.surface_text {
+            // Short-line hold from picked surface (merge pick already joins multi-line siblings).
+            let hold_inputs: Vec<String> = snap
+                .surface_text
+                .iter()
+                .cloned()
+                .collect();
+            let _held = short_hold.on_poll(&hold_inputs, |t| buffer.is_covered(t));
+
+            if let Some(ref raw_surface) = snap.surface_text {
+                let surface = short_hold.inject_into_surface(raw_surface);
                 let tick =
-                    surface_tr.on_surface(surface, buffer.is_covered(surface));
+                    surface_tr.on_surface(&surface, buffer.is_covered(&surface));
                 crate::debuglog::log(&format!(
                     "surface_chars={} stale={} empty={} skip={} preview={:?}",
                     surface.chars().count(),
@@ -293,16 +312,26 @@ fn run_loop(inner: Arc<EngineInner>, tx: Sender<EngineEvent>) {
                     let _ = tx.send(EngineEvent::Status(LAG_TIP.into()));
                 }
 
+                // Always refresh Live from surface edge (even when skip_stale).
+                let edge = live_edge_phrase(&surface);
+                if !edge.is_empty() && edge != last_live_edge {
+                    last_live_edge = edge.clone();
+                    let _ = tx.send(EngineEvent::Live(edge));
+                }
+
                 // If AX is stuck on a line we already finalized, skip re-processing
                 // (tracker re-checks every 5th stale tick via should_skip_stale_surface).
                 if tick.process_surface {
-                    match buffer.observe(surface) {
+                    match buffer.observe(&surface) {
                         BufferEmit::Partial(t) => {
                             // Live UI: current phrase only (not the whole rolling LC blob).
                             let edge = live_edge_phrase(&t);
                             let edge = if edge.is_empty() { t } else { edge };
                             crate::debuglog::log(&format!("PARTIAL {edge}"));
-                            let _ = tx.send(EngineEvent::Live(edge));
+                            if edge != last_live_edge {
+                                last_live_edge = edge.clone();
+                                let _ = tx.send(EngineEvent::Live(edge));
+                            }
                         }
                         BufferEmit::Final(t) => {
                             crate::debuglog::log(&format!("FINAL {t}"));
@@ -312,6 +341,7 @@ fn run_loop(inner: Arc<EngineInner>, tx: Sender<EngineEvent>) {
                             } else {
                                 edge
                             };
+                            last_live_edge = edge.clone();
                             let _ = tx.send(EngineEvent::Live(edge));
                             let _ = tx.send(EngineEvent::Final(t.clone()));
                             if let Some(ref mut w) = writer {
@@ -327,6 +357,7 @@ fn run_loop(inner: Arc<EngineInner>, tx: Sender<EngineEvent>) {
                             } else {
                                 edge
                             };
+                            last_live_edge = edge.clone();
                             let _ = tx.send(EngineEvent::Live(edge));
                             let _ = tx.send(EngineEvent::Revised(t.clone()));
                             if let Some(ref mut w) = writer {
@@ -343,6 +374,7 @@ fn run_loop(inner: Arc<EngineInner>, tx: Sender<EngineEvent>) {
                                 } else {
                                     edge
                                 };
+                                last_live_edge = edge.clone();
                                 let _ = tx.send(EngineEvent::Live(edge));
                                 let _ = tx.send(EngineEvent::Final(t.clone()));
                                 if let Some(ref mut w) = writer {
@@ -355,10 +387,36 @@ fn run_loop(inner: Arc<EngineInner>, tx: Sender<EngineEvent>) {
                     }
                 }
             } else {
+                // Decay holds even without surface; try empty leave-window via held inject.
+                if !_held.is_empty() {
+                    let synthetic = short_hold.inject_into_surface("");
+                    if !synthetic.trim().is_empty() {
+                        match buffer.observe(&synthetic) {
+                            BufferEmit::Final(t) | BufferEmit::Revised(t) => {
+                                crate::debuglog::log(&format!("FINAL {t}"));
+                                let _ = tx.send(EngineEvent::Final(t.clone()));
+                                if let Some(ref mut w) = writer {
+                                    let _ = w.write_final(&format_clock(SystemTime::now()), &t);
+                                }
+                            }
+                            BufferEmit::Finals(v) => {
+                                for t in v {
+                                    crate::debuglog::log(&format!("FINAL {t}"));
+                                    let _ = tx.send(EngineEvent::Final(t.clone()));
+                                    if let Some(ref mut w) = writer {
+                                        let _ = w.write_final(&format_clock(SystemTime::now()), &t);
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
                 // No surface (junk filtered out) — dedicated empty_ticks, not shared stale.
                 let tick = surface_tr.on_empty();
                 if tick.clear_live {
                     crate::debuglog::log("no caption surface (junk filtered or empty AX) — clear live");
+                    last_live_edge.clear();
                     let _ = tx.send(EngineEvent::Live(String::new()));
                 }
                 if tick.show_lag_tip {

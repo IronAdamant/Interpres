@@ -224,8 +224,19 @@ fn pid_for_live_captions() -> Option<i32> {
     None
 }
 
-/// Ask macOS to show the Accessibility permission dialog (once per call when untrusted).
+/// Ask macOS to show the Accessibility permission dialog at most **once per process**.
+/// Calling AXTrustedCheckOptionPrompt on every poll re-pops the dialog forever when untrusted.
 pub fn request_accessibility_prompt() -> bool {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static PROMPTED: AtomicBool = AtomicBool::new(false);
+
+    if unsafe { AXIsProcessTrusted() } != 0 {
+        return true;
+    }
+    // Only show the system sheet once; later checks are silent until the user enables + restarts.
+    if PROMPTED.swap(true, Ordering::SeqCst) {
+        return unsafe { AXIsProcessTrusted() != 0 };
+    }
     unsafe {
         let key = cfstr("AXTrustedCheckOptionPrompt");
         if key.is_null() {
@@ -269,12 +280,8 @@ pub fn open_accessibility_settings() {
 }
 
 pub fn poll_text(presence: LiveCaptionsPresence) -> CaptureSnapshot {
-    // Offer the system prompt if we are not trusted yet.
-    let trusted = if unsafe { AXIsProcessTrusted() } != 0 {
-        true
-    } else {
-        request_accessibility_prompt()
-    };
+    // Prompt at most once per process when untrusted (see request_accessibility_prompt).
+    let trusted = request_accessibility_prompt();
 
     if !trusted {
         return CaptureSnapshot {
@@ -282,10 +289,10 @@ pub fn poll_text(presence: LiveCaptionsPresence) -> CaptureSnapshot {
             detail: presence.detail,
             surface_text: None,
             error: Some(
-                "macOS Accessibility is OFF for this app. \
+                "macOS Accessibility is OFF for this copy of Interpres. \
                  System Settings → Privacy & Security → Accessibility → enable \
-                 the app that launched Interpres (Terminal, Interpres, or iTerm). \
-                 Quit and reopen Interpres after enabling. \
+                 “Interpres” (the .app) or the “interpres” binary you launched. \
+                 After a rebuild, toggle it OFF then ON again, fully Quit Interpres, and reopen. \
                  Live Captions is running but macOS will not let us read its text."
                     .into(),
             ),
@@ -337,7 +344,29 @@ pub fn poll_text(presence: LiveCaptionsPresence) -> CaptureSnapshot {
 
     // Rank non-junk candidates; pure picker never returns junk-only surfaces.
     let candidate_count = strings.len();
+    let ranked = crate::buffer::rank_caption_candidates(strings.iter().map(|s| s.as_str()));
     let surface = crate::buffer::pick_caption_surface(strings.iter().map(|s| s.as_str()));
+
+    // Top-N pick debug: prove AX saw short lines even when merge chooses multi-line.
+    if crate::debuglog::is_enabled() {
+        for (i, (sc, t)) in ranked.iter().take(8).enumerate() {
+            let preview: String = t.chars().take(100).collect();
+            crate::debuglog::log(&format!(
+                "macos pick top: [{i}] score={sc} chars={} {preview:?}",
+                t.chars().count()
+            ));
+        }
+        if let Some(ref s) = surface {
+            let lines = s.lines().filter(|l| !l.trim().is_empty()).count();
+            crate::debuglog::log(&format!(
+                "macos pick chosen: lines={lines} chars={} preview={:?}",
+                s.chars().count(),
+                s.chars().take(120).collect::<String>()
+            ));
+        } else {
+            crate::debuglog::log("macos pick chosen: none");
+        }
+    }
 
     crate::debuglog::log(&format!(
         "macos poll pid={pid} surface_chars={} candidates={} detail={}",
@@ -413,12 +442,23 @@ pub fn diagnose_lines() -> Vec<String> {
     }
     unsafe { CFRelease(app) };
     lines.push(format!("ax_text_nodes={}", strings.len()));
-    // Show top 5 longest samples (truncated)
-    let mut ranked = strings;
-    ranked.sort_by_key(|s| std::cmp::Reverse(s.chars().count()));
-    for (i, s) in ranked.iter().take(5).enumerate() {
+    // Speech-ranked samples (same scorer as live pick), not merely longest chrome.
+    let ranked = crate::buffer::rank_caption_candidates(strings.iter().map(|s| s.as_str()));
+    for (i, (sc, s)) in ranked.iter().take(5).enumerate() {
         let preview: String = s.chars().take(120).collect();
-        lines.push(format!("sample[{i}] chars={} text={preview}", s.chars().count()));
+        lines.push(format!(
+            "sample[{i}] score={sc} chars={} text={preview}",
+            s.chars().count()
+        ));
+    }
+    if let Some(picked) = crate::buffer::pick_caption_surface(strings.iter().map(|s| s.as_str())) {
+        let preview: String = picked.chars().take(160).collect();
+        lines.push(format!(
+            "pick_merge chars={} text={preview}",
+            picked.chars().count()
+        ));
+    } else {
+        lines.push("pick_merge=none".into());
     }
     if ranked.is_empty() {
         lines.push(

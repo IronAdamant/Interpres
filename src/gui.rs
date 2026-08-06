@@ -48,6 +48,7 @@ extern "C" {
     fn interpres_gui_set_status(text: *const c_char);
     fn interpres_gui_set_live_text(text: *const c_char);
     fn interpres_gui_append_history(line: *const c_char);
+    fn interpres_gui_clear_history();
     fn interpres_gui_set_folder(path: *const c_char);
     fn interpres_gui_set_remember(on: c_int);
     fn interpres_gui_set_debug(on: c_int);
@@ -173,7 +174,17 @@ fn apply_event(ev: EngineEvent, last_hist: &Arc<Mutex<String>>) {
         EngineEvent::SessionFile(None) => {
             set_session(None);
         }
-        EngineEvent::Listening(on) => set_listening(on),
+        EngineEvent::Listening(on) => {
+            set_listening(on);
+            if on {
+                // New listen session: wipe previous Session (saved lines) and Live.
+                clear_history();
+                set_live("");
+                if let Ok(mut last) = last_hist.lock() {
+                    last.clear();
+                }
+            }
+        }
     }
 }
 
@@ -196,6 +207,10 @@ fn set_live(s: &str) {
 fn append_history(s: &str) {
     let c = c_string(s);
     unsafe { interpres_gui_append_history(c.as_ptr()) };
+}
+#[cfg(target_os = "macos")]
+fn clear_history() {
+    unsafe { interpres_gui_clear_history() };
 }
 #[cfg(target_os = "macos")]
 fn set_folder_label(path: &Path) {

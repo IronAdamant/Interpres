@@ -76,10 +76,14 @@ EOF
 chmod +x "$DIST/Check Live Captions (probe).command"
 
 # --- macOS .app (double-click in Finder) ---
+# Put the REAL Mach-O as Contents/MacOS/Interpres (not a bash wrapper).
+# TCC Accessibility keys off binary identity; a shell launcher + Resources/interpres
+# made every rebuild look like a different "interpres" and re-prompted forever.
 APP="$DIST/Interpres.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp "$DIST/interpres" "$APP/Contents/Resources/interpres"
-chmod +x "$APP/Contents/Resources/interpres"
+cp "$DIST/interpres" "$APP/Contents/MacOS/Interpres"
+chmod +x "$APP/Contents/MacOS/Interpres"
+# Keep a copy next to portable pack helpers for CLI/command scripts.
 cp -R "$DIST/helpers" "$APP/Contents/Resources/helpers" 2>/dev/null || true
 # App icon (zero crates — prebuilt .icns from assets/)
 if [ -f "$ROOT/assets/Interpres.icns" ]; then
@@ -89,17 +93,6 @@ if [ -f "$ROOT/assets/logo.png" ]; then
   cp "$ROOT/assets/logo.png" "$APP/Contents/Resources/logo.png"
   cp "$ROOT/assets/logo.png" "$DIST/logo.png"
 fi
-
-# Launcher: run the real binary (native AppKit window — no Terminal, no webpage)
-cat > "$APP/Contents/MacOS/Interpres" << 'EOF'
-#!/bin/bash
-RES="$(cd "$(dirname "$0")/../Resources" && pwd)"
-cd "$RES" || exit 1
-export INTERPRES_GUI=1
-# No args → native window UI (Rust core + AppKit)
-exec ./interpres
-EOF
-chmod +x "$APP/Contents/MacOS/Interpres"
 
 cat > "$APP/Contents/Info.plist" << 'EOF'
 <?xml version="1.0" encoding="UTF-8"?>

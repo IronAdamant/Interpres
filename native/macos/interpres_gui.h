@@ -26,6 +26,8 @@ int interpres_gui_main(InterpresGuiCallbacks callbacks);
 void interpres_gui_set_status(const char *text);
 void interpres_gui_set_live_text(const char *text);
 void interpres_gui_append_history(const char *line);
+/** Wipe Session (saved lines) — call when a new listen session begins. */
+void interpres_gui_clear_history(void);
 void interpres_gui_set_folder(const char *path);
 void interpres_gui_set_remember(int on);
 void interpres_gui_set_debug(int on);
