@@ -69,7 +69,8 @@ Play audio (video, call, meeting) so captions appear.
 1. Open Interpres (app or `.exe` as above).  
 2. Press **Start listening**.  
 3. Optional: **Save to disk: ON** and **Choose folder…** (default is often Documents → Interpres Transcripts).  
-4. When you finish, press **Stop**.
+4. Optional: **Theme: System / Light / Dark** — appearance only (follows your OS by default; does not change caption capture).  
+5. When you finish, press **Stop**.
 
 **Mac only:** if no text appears, System Settings → Privacy & Security → **Accessibility** → allow **Interpres** (or Terminal if you use the command line). Quit and reopen Interpres after changing that.
 

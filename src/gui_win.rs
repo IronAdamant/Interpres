@@ -6,6 +6,7 @@ use crate::buffer::same_or_refinement;
 use crate::config::Config;
 use crate::engine::{CaptureEngine, EngineEvent};
 use crate::probe;
+use crate::theme::{palette_for_dark, ThemeMode};
 use crate::ui_labels::{folder_label, remember_toggle_status, session_footer};
 use std::os::raw::{c_int, c_void};
 use std::path::{Path, PathBuf};
@@ -33,6 +34,9 @@ const WM_TIMER: u32 = 0x0113;
 const WM_SETFONT: u32 = 0x0030;
 const WM_CTLCOLORSTATIC: u32 = 0x0138;
 const WM_CTLCOLOREDIT: u32 = 0x0133;
+const WM_CTLCOLORBTN: u32 = 0x0135;
+const WM_SETTINGCHANGE: u32 = 0x001A;
+const WM_ERASEBKGND: u32 = 0x0014;
 const WS_OVERLAPPEDWINDOW: u32 = 0x00CF_0000;
 const WS_VISIBLE: u32 = 0x1000_0000;
 const WS_CHILD: u32 = 0x4000_0000;
@@ -74,6 +78,7 @@ const IDC_FOLDER: i32 = 1004;
 const IDC_OPEN: i32 = 1005;
 const IDC_CHECK: i32 = 1006;
 const IDC_DEBUG: i32 = 1007;
+const IDC_THEME: i32 = 1008;
 const IDC_STATUS: i32 = 1101;
 const IDC_LIVE: i32 = 1102;
 const IDC_HISTORY: i32 = 1103;
@@ -188,7 +193,46 @@ extern "system" {
     fn GetConsoleWindow() -> Hwnd;
     fn SetFocus(hwnd: Hwnd) -> Hwnd;
     fn GetSysColorBrush(index: c_int) -> Hbrush;
+    fn GetDlgCtrlID(hwnd: Hwnd) -> c_int;
+    fn InvalidateRect(hwnd: Hwnd, rc: *const Rect, erase: c_int) -> c_int;
+    fn FillRect(hdc: Hdc, rc: *const Rect, brush: Hbrush) -> c_int;
 }
+
+#[link(name = "uxtheme")]
+extern "system" {
+    fn SetWindowTheme(hwnd: Hwnd, sub_app: *const u16, sub_id: *const u16) -> i32;
+}
+
+#[link(name = "dwmapi")]
+extern "system" {
+    fn DwmSetWindowAttribute(hwnd: Hwnd, attr: u32, value: *const c_void, size: u32) -> i32;
+}
+
+const DWMWA_USE_IMMERSIVE_DARK_MODE: u32 = 20;
+
+#[link(name = "advapi32")]
+extern "system" {
+    fn RegOpenKeyExW(
+        key: *mut c_void,
+        sub: *const u16,
+        options: u32,
+        sam: u32,
+        result: *mut *mut c_void,
+    ) -> i32;
+    fn RegQueryValueExW(
+        key: *mut c_void,
+        name: *const u16,
+        reserved: *mut u32,
+        ty: *mut u32,
+        data: *mut u8,
+        data_len: *mut u32,
+    ) -> i32;
+    fn RegCloseKey(key: *mut c_void) -> i32;
+}
+
+const HKEY_CURRENT_USER: *mut c_void = 0x8000_0001u32 as usize as *mut c_void;
+const KEY_READ: u32 = 0x20019;
+const REG_DWORD: u32 = 4;
 
 const IMAGE_ICON: u32 = 1;
 const LR_LOADFROMFILE: u32 = 0x0010;
@@ -256,10 +300,40 @@ const CLEARTYPE_QUALITY: u32 = 5;
 const DEFAULT_PITCH: u32 = 0;
 const TRANSPARENT: c_int = 1;
 
-// GDI color: 0x00BBGGRR
-const COL_BG: u32 = 0x001A_1412; // dark ~ (0.07,0.08,0.10)
-const COL_PANEL: u32 = 0x0029_2120;
-const COL_TEXT: u32 = 0x00F2_F2F2;
+/// Windows "AppsUseLightTheme" = 0 → dark apps.
+fn system_apps_use_dark() -> bool {
+    unsafe {
+        let sub = to_wide(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
+        let mut key: *mut c_void = ptr::null_mut();
+        if RegOpenKeyExW(HKEY_CURRENT_USER, sub.as_ptr(), 0, KEY_READ, &mut key) != 0 {
+            return true; // prefer dark chrome if unknown
+        }
+        let name = to_wide("AppsUseLightTheme");
+        let mut ty: u32 = 0;
+        let mut data: u32 = 1;
+        let mut len: u32 = 4;
+        let ok = RegQueryValueExW(
+            key,
+            name.as_ptr(),
+            ptr::null_mut(),
+            &mut ty,
+            &mut data as *mut u32 as *mut u8,
+            &mut len,
+        );
+        RegCloseKey(key);
+        if ok != 0 || ty != REG_DWORD {
+            return true;
+        }
+        data == 0
+    }
+}
+
+fn muted_control(id: i32) -> bool {
+    matches!(
+        id,
+        IDC_STATUS | IDC_FOLDER_LBL | IDC_SESSION | IDC_SUBTITLE
+    )
+}
 
 fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -368,6 +442,7 @@ struct UiHandles {
     stop: Hwnd,
     remember: Hwnd,
     debug: Hwnd,
+    theme: Hwnd,
     // layout anchors
     title: Hwnd,
     subtitle: Hwnd,
@@ -389,6 +464,14 @@ struct AppCtx {
     font_live: Hfont,
     brush_bg: Hbrush,
     brush_panel: Hbrush,
+    brush_button: Hbrush,
+    theme_mode: ThemeMode,
+    is_dark: bool,
+    col_bg: u32,
+    col_panel: u32,
+    col_text: u32,
+    col_muted: u32,
+    col_button: u32,
 }
 
 static mut APP: *mut AppCtx = ptr::null_mut();
@@ -399,6 +482,14 @@ fn with_app<F: FnOnce(&AppCtx)>(f: F) {
     unsafe {
         if !APP.is_null() {
             f(&*APP);
+        }
+    }
+}
+
+fn with_app_mut<F: FnOnce(&mut AppCtx)>(f: F) {
+    unsafe {
+        if !APP.is_null() {
+            f(&mut *APP);
         }
     }
 }
@@ -489,6 +580,90 @@ fn set_debug_btn(ui: &UiHandles, on: bool) {
     set_text(ui.debug, if on { "Debug: ON" } else { "Debug: OFF" });
 }
 
+fn set_theme_btn(ui: &UiHandles, mode: ThemeMode) {
+    set_text(ui.theme, mode.button_label());
+}
+
+/// Apply light/dark chrome (brushes, title bar, control themes). UI-only.
+fn apply_theme_colors(app: &mut AppCtx) {
+    let is_dark = app.theme_mode.resolve_dark(system_apps_use_dark());
+    app.is_dark = is_dark;
+    let p = palette_for_dark(is_dark);
+    app.col_bg = p.bg.to_gdi();
+    app.col_panel = p.panel.to_gdi();
+    app.col_text = p.text.to_gdi();
+    app.col_muted = p.muted.to_gdi();
+    app.col_button = p.button.to_gdi();
+
+    unsafe {
+        if !app.brush_bg.is_null() {
+            DeleteObject(app.brush_bg);
+        }
+        if !app.brush_panel.is_null() {
+            DeleteObject(app.brush_panel);
+        }
+        if !app.brush_button.is_null() {
+            DeleteObject(app.brush_button);
+        }
+        app.brush_bg = CreateSolidBrush(app.col_bg);
+        app.brush_panel = CreateSolidBrush(app.col_panel);
+        app.brush_button = CreateSolidBrush(app.col_button);
+    }
+
+    let Ok(ui) = app.ui.lock() else {
+        return;
+    };
+    if ui.main.is_null() {
+        return;
+    }
+
+    // Dark title bar (Win10 1809+ / Win11)
+    let dark_flag: i32 = if is_dark { 1 } else { 0 };
+    unsafe {
+        DwmSetWindowAttribute(
+            ui.main,
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            &dark_flag as *const i32 as *const c_void,
+            std::mem::size_of::<i32>() as u32,
+        );
+    }
+
+    // Prefer dark explorer theme on themed controls; empty string falls back to classic
+    // so WM_CTLCOLOR* can paint button faces consistently with our palette.
+    let theme_name = if is_dark {
+        to_wide("DarkMode_Explorer")
+    } else {
+        to_wide("Explorer")
+    };
+    let empty = to_wide("");
+    for h in [
+        ui.start,
+        ui.stop,
+        ui.remember,
+        ui.choose,
+        ui.open,
+        ui.check,
+        ui.debug,
+        ui.theme,
+        ui.live,
+        ui.history,
+    ] {
+        if h.is_null() {
+            continue;
+        }
+        unsafe {
+            // Classic non-client styling so our brush colors apply more reliably.
+            SetWindowTheme(h, empty.as_ptr(), empty.as_ptr());
+            let _ = theme_name; // kept for future soft-theming experiments
+        }
+    }
+
+    set_theme_btn(&ui, app.theme_mode);
+    unsafe {
+        InvalidateRect(ui.main, ptr::null(), 1);
+    }
+}
+
 fn child(
     class: &str,
     text: &str,
@@ -567,16 +742,18 @@ fn layout(ui: &UiHandles) {
     let by2 = 148;
     move_c(ui.check, m, by2, 160, 40);
     move_c(ui.debug, m + 172, by2, 140, 40);
+    move_c(ui.theme, m + 324, by2, 160, 40);
     move_c(ui.open, m + 556, by2, 160, 40);
 
     move_c(ui.status_lbl, m, 200, 100, 20);
-    move_c(ui.status, m, 222, bw, 40);
+    // Taller status so multi-line idle guidance matches macOS (no mid-sentence clip).
+    move_c(ui.status, m, 222, bw, 48);
 
-    move_c(ui.live_lbl, m, 270, 200, 20);
+    move_c(ui.live_lbl, m, 278, 200, 20);
     let live_h = 100;
-    move_c(ui.live, m, 292, bw, live_h);
+    move_c(ui.live, m, 300, bw, live_h);
 
-    let hist_top = 292 + live_h + 12;
+    let hist_top = 300 + live_h + 12;
     move_c(ui.hist_lbl, m, hist_top, 280, 20);
     let hist_y = hist_top + 22;
     let hist_h = (h - hist_y - 70).max(120);
@@ -610,26 +787,58 @@ unsafe extern "system" fn wnd_proc(hwnd: Hwnd, msg: u32, wp: Wparam, lp: Lparam)
             });
             0
         }
-        WM_CTLCOLORSTATIC | WM_CTLCOLOREDIT => {
+        WM_CTLCOLORSTATIC | WM_CTLCOLOREDIT | WM_CTLCOLORBTN => {
             let hdc = wp as Hdc;
-            SetTextColor(hdc, COL_TEXT);
-            SetBkColor(
-                hdc,
-                if msg == WM_CTLCOLOREDIT {
-                    COL_PANEL
-                } else {
-                    COL_BG
-                },
-            );
-            SetBkMode(hdc, TRANSPARENT);
-            let brush = if APP.is_null() {
-                GetSysColorBrush(COLOR_WINDOW as c_int)
-            } else if msg == WM_CTLCOLOREDIT {
-                (*APP).brush_panel
+            let ctrl = lp as Hwnd;
+            let id = if !ctrl.is_null() {
+                GetDlgCtrlID(ctrl)
             } else {
-                (*APP).brush_bg
+                0
             };
+            if APP.is_null() {
+                return GetSysColorBrush(COLOR_WINDOW as c_int) as Lresult;
+            }
+            let app = &*APP;
+            let text = if msg == WM_CTLCOLORSTATIC && muted_control(id) {
+                app.col_muted
+            } else {
+                app.col_text
+            };
+            SetTextColor(hdc, text);
+            let (bk, brush) = if msg == WM_CTLCOLOREDIT {
+                (app.col_panel, app.brush_panel)
+            } else if msg == WM_CTLCOLORBTN {
+                (app.col_button, app.brush_button)
+            } else {
+                (app.col_bg, app.brush_bg)
+            };
+            SetBkColor(hdc, bk);
+            SetBkMode(hdc, TRANSPARENT);
             brush as Lresult
+        }
+        WM_ERASEBKGND => {
+            if !APP.is_null() {
+                let hdc = wp as Hdc;
+                let mut rc = Rect {
+                    left: 0,
+                    top: 0,
+                    right: 0,
+                    bottom: 0,
+                };
+                GetClientRect(hwnd, &mut rc);
+                FillRect(hdc, &rc, (*APP).brush_bg);
+                return 1;
+            }
+            0
+        }
+        WM_SETTINGCHANGE => {
+            // OS light/dark flip while Theme: System is selected.
+            with_app_mut(|app| {
+                if app.theme_mode == ThemeMode::System {
+                    apply_theme_colors(app);
+                }
+            });
+            0
         }
         WM_CLOSE => {
             with_app(|app| {
@@ -746,6 +955,33 @@ fn on_button(id: i32) {
                     }
                 }
             });
+        }
+        IDC_THEME => {
+            let next = {
+                let mut next = ThemeMode::System;
+                with_app_mut(|app| {
+                    next = app.theme_mode.cycle();
+                    app.theme_mode = next;
+                    apply_theme_colors(app);
+                });
+                next
+            };
+            let mut cfg = Config::load();
+            cfg.theme = next;
+            let _ = cfg.save();
+            with_app(|app| {
+                if let Ok(ui) = app.ui.lock() {
+                    set_theme_btn(&ui, next);
+                    set_text(
+                        ui.status,
+                        &format!(
+                            "Appearance: {} (UI only — capture is unchanged).",
+                            next.as_str()
+                        ),
+                    );
+                }
+            });
+            crate::debuglog::log(&format!("theme set to {}", next.as_str()));
         }
         IDC_FOLDER => {
             // Never hold Mutex across SHBrowseForFolder: nested message loop
@@ -1063,8 +1299,17 @@ pub fn run_windows_gui() -> i32 {
             face.as_ptr(),
         )
     };
-    let brush_bg = unsafe { CreateSolidBrush(COL_BG) };
-    let brush_panel = unsafe { CreateSolidBrush(COL_PANEL) };
+    let theme0 = cfg.theme;
+    let is_dark0 = theme0.resolve_dark(system_apps_use_dark());
+    let pal0 = palette_for_dark(is_dark0);
+    let col_bg = pal0.bg.to_gdi();
+    let col_panel = pal0.panel.to_gdi();
+    let col_text = pal0.text.to_gdi();
+    let col_muted = pal0.muted.to_gdi();
+    let col_button = pal0.button.to_gdi();
+    let brush_bg = unsafe { CreateSolidBrush(col_bg) };
+    let brush_panel = unsafe { CreateSolidBrush(col_panel) };
+    let brush_button = unsafe { CreateSolidBrush(col_button) };
 
     let wc = WndClassExW {
         cb_size: std::mem::size_of::<WndClassExW>() as u32,
@@ -1148,8 +1393,20 @@ pub fn run_windows_gui() -> i32 {
             IDC_SUBTITLE,
             instance,
         ),
-        start: child("BUTTON", "Start listening", btn, 0, 0, 10, 10, main, IDC_START, instance),
-        stop: child("BUTTON", "Stop", btn, 0, 0, 10, 10, main, IDC_STOP, instance),
+        // Labels aligned with macOS (symbols + ellipsis) for side-by-side consistency.
+        start: child(
+            "BUTTON",
+            "▶  Start listening",
+            btn,
+            0,
+            0,
+            10,
+            10,
+            main,
+            IDC_START,
+            instance,
+        ),
+        stop: child("BUTTON", "■  Stop", btn, 0, 0, 10, 10, main, IDC_STOP, instance),
         remember: child(
             "BUTTON",
             if remember0 {
@@ -1166,7 +1423,18 @@ pub fn run_windows_gui() -> i32 {
             IDC_REMEMBER,
             instance,
         ),
-        choose: child("BUTTON", "Choose folder...", btn, 0, 0, 10, 10, main, IDC_FOLDER, instance),
+        choose: child(
+            "BUTTON",
+            "Choose folder…",
+            btn,
+            0,
+            0,
+            10,
+            10,
+            main,
+            IDC_FOLDER,
+            instance,
+        ),
         open: child("BUTTON", "Open folder", btn, 0, 0, 10, 10, main, IDC_OPEN, instance),
         check: child("BUTTON", "Check setup", btn, 0, 0, 10, 10, main, IDC_CHECK, instance),
         debug: child(
@@ -1179,6 +1447,18 @@ pub fn run_windows_gui() -> i32 {
             10,
             main,
             IDC_DEBUG,
+            instance,
+        ),
+        theme: child(
+            "BUTTON",
+            theme0.button_label(),
+            btn,
+            0,
+            0,
+            10,
+            10,
+            main,
+            IDC_THEME,
             instance,
         ),
         status_lbl: child("STATIC", "Status", SS_LEFT | SS_NOPREFIX, 0, 0, 10, 10, main, IDC_STATUS_LBL, instance),
@@ -1227,6 +1507,7 @@ pub fn run_windows_gui() -> i32 {
         ui.open,
         ui.check,
         ui.debug,
+        ui.theme,
         ui.status_lbl,
         ui.status,
         ui.live_lbl,
@@ -1255,9 +1536,19 @@ pub fn run_windows_gui() -> i32 {
         font_live,
         brush_bg,
         brush_panel,
+        brush_button,
+        theme_mode: theme0,
+        is_dark: is_dark0,
+        col_bg,
+        col_panel,
+        col_text,
+        col_muted,
+        col_button,
     });
     unsafe {
         APP = Box::into_raw(app);
+        // Apply title-bar dark mode + control theme before first paint.
+        with_app_mut(|app| apply_theme_colors(app));
         SetTimer(main, IDT_PUMP, 30, ptr::null());
         ShowWindow(main, SW_SHOW);
         UpdateWindow(main);
@@ -1265,10 +1556,11 @@ pub fn run_windows_gui() -> i32 {
     }
 
     crate::debuglog::log(&format!(
-        "ui ready folder={} remember={} debug={}",
+        "ui ready folder={} remember={} debug={} theme={}",
         folder0.display(),
         remember0,
-        debug0
+        debug0,
+        theme0.as_str()
     ));
 
     // Message loop
@@ -1315,6 +1607,9 @@ pub fn run_windows_gui() -> i32 {
             }
             if !app.brush_panel.is_null() {
                 DeleteObject(app.brush_panel);
+            }
+            if !app.brush_button.is_null() {
+                DeleteObject(app.brush_button);
             }
         }
     }

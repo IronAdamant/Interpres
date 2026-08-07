@@ -1,5 +1,6 @@
 //! Hand-written settings (no serde). Stored as simple `key=value` lines.
 
+use crate::theme::ThemeMode;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -23,6 +24,8 @@ pub struct Config {
     pub source: String,
     /// Write debug logs into the transcript folder (`interpres-debug.log` / session `.debug.log`).
     pub debug: bool,
+    /// UI appearance: system (follow OS), light, or dark. Does not affect capture.
+    pub theme: ThemeMode,
 }
 
 impl Default for Config {
@@ -38,6 +41,7 @@ impl Default for Config {
             helper_path: None,
             source: "os".to_string(),
             debug: false,
+            theme: ThemeMode::System,
         }
     }
 }
@@ -129,6 +133,7 @@ impl Config {
                     }
                 }
                 "debug" => cfg.debug = parse_bool(v),
+                "theme" => cfg.theme = ThemeMode::parse(v),
                 _ => {}
             }
         }
@@ -172,6 +177,7 @@ impl Config {
         )?;
         writeln!(f, "source={}", self.source)?;
         writeln!(f, "debug={}", if self.debug { "true" } else { "false" })?;
+        writeln!(f, "theme={}", self.theme.as_str())?;
         Ok(())
     }
 }
@@ -205,6 +211,7 @@ mod tests {
         cfg.write_jsonl = true;
         cfg.off_delay_ms = 3000;
         cfg.source = "os".into();
+        cfg.theme = ThemeMode::Light;
         cfg.save_to(&path).expect("save");
         let loaded = Config::load_from(&path);
         assert_eq!(loaded.remember, true);
@@ -214,6 +221,7 @@ mod tests {
         );
         assert_eq!(loaded.write_jsonl, true);
         assert_eq!(loaded.off_delay_ms, 3000);
+        assert_eq!(loaded.theme, ThemeMode::Light);
         let _ = fs::remove_file(path);
     }
 }

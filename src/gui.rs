@@ -39,6 +39,7 @@ struct InterpresGuiCallbacks {
     on_open_folder: Option<extern "C" fn(*mut c_void)>,
     on_check: Option<extern "C" fn(*mut c_void)>,
     on_debug: Option<extern "C" fn(*mut c_void, c_int)>,
+    on_theme: Option<extern "C" fn(*mut c_void, c_int)>,
     on_ready: Option<extern "C" fn(*mut c_void)>,
 }
 
@@ -52,6 +53,7 @@ extern "C" {
     fn interpres_gui_set_folder(path: *const c_char);
     fn interpres_gui_set_remember(on: c_int);
     fn interpres_gui_set_debug(on: c_int);
+    fn interpres_gui_set_theme(mode: c_int);
     fn interpres_gui_set_listening(on: c_int);
     fn interpres_gui_set_session_file(path: *const c_char);
     fn interpres_gui_pick_folder(buf: *mut c_char, buflen: c_int) -> c_int;
@@ -109,6 +111,7 @@ fn run_macos_gui() -> i32 {
         on_open_folder: Some(cb_open_folder),
         on_check: Some(cb_check),
         on_debug: Some(cb_debug),
+        on_theme: Some(cb_theme),
         on_ready: Some(cb_ready),
     };
 
@@ -230,6 +233,10 @@ fn set_debug_ui(on: bool) {
     unsafe { interpres_gui_set_debug(if on { 1 } else { 0 }) };
 }
 #[cfg(target_os = "macos")]
+fn set_theme_ui(mode: crate::theme::ThemeMode) {
+    unsafe { interpres_gui_set_theme(mode.as_int()) };
+}
+#[cfg(target_os = "macos")]
 fn set_listening(on: bool) {
     unsafe { interpres_gui_set_listening(if on { 1 } else { 0 }) };
 }
@@ -265,14 +272,16 @@ extern "C" fn cb_ready(user: *mut c_void) {
     set_folder_label(&folder);
     set_remember_ui(remember);
     set_debug_ui(cfg.debug);
+    set_theme_ui(cfg.theme);
     set_session(None);
     set_status(crate::ui_labels::idle_setup_status());
     crate::debuglog::set_folder(&folder);
     crate::debuglog::log(&format!(
-        "ui ready folder={} remember={} debug={}",
+        "ui ready folder={} remember={} debug={} theme={}",
         folder.display(),
         remember,
-        cfg.debug
+        cfg.debug,
+        cfg.theme.as_str()
     ));
 }
 
@@ -334,6 +343,21 @@ extern "C" fn cb_debug(user: *mut c_void, value: c_int) {
     } else {
         set_status("Debug OFF.");
     }
+}
+
+#[cfg(target_os = "macos")]
+extern "C" fn cb_theme(user: *mut c_void, value: c_int) {
+    let _state = state_from(user);
+    let mode = crate::theme::ThemeMode::from_int(value);
+    let mut cfg = Config::load();
+    cfg.theme = mode;
+    let _ = cfg.save();
+    set_theme_ui(mode);
+    set_status(&format!(
+        "Appearance: {} (UI only — capture is unchanged).",
+        mode.as_str()
+    ));
+    crate::debuglog::log(&format!("theme set to {}", mode.as_str()));
 }
 
 #[cfg(target_os = "macos")]

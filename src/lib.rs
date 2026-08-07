@@ -17,6 +17,7 @@ pub mod plugin_host;
 pub mod probe;
 pub mod protocol;
 pub mod session;
+pub mod theme;
 pub mod transcript;
 pub mod ui_labels;
 pub mod watcher;

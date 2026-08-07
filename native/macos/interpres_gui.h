@@ -18,6 +18,7 @@ typedef struct InterpresGuiCallbacks {
     interpres_fn on_open_folder;
     interpres_fn on_check;
     interpres_int_fn on_debug; /* 1 = debug on, 0 = off */
+    interpres_int_fn on_theme; /* 0 = system, 1 = light, 2 = dark (UI only) */
     interpres_fn on_ready;     /* window created — re-push folder/save labels */
 } InterpresGuiCallbacks;
 
@@ -31,6 +32,8 @@ void interpres_gui_clear_history(void);
 void interpres_gui_set_folder(const char *path);
 void interpres_gui_set_remember(int on);
 void interpres_gui_set_debug(int on);
+/** UI appearance: 0 = system, 1 = light, 2 = dark. Does not affect capture. */
+void interpres_gui_set_theme(int mode);
 void interpres_gui_set_listening(int on);
 void interpres_gui_set_session_file(const char *path);
 
