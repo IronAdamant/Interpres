@@ -12,22 +12,31 @@ $Root = Resolve-Path (Join-Path $PSScriptRoot '..')
 Set-Location $Root
 
 Write-Host '==> Building Windows release binary...'
-# Ensure MinGW windres is available so the app icon embeds into interpres.exe
+# Prefer GNU/binutils windres (WinLibs). LLVM-MinGW windres + GNU ld often
+# links a broken .rsrc tree so Explorer shows the default exe icon.
+$preferWindres = @(
+    "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe\mingw64\bin\windres.exe"
+)
+# Also accept any non-LLVM windres already on PATH
+Get-Command windres -All -ErrorAction SilentlyContinue | ForEach-Object {
+    $preferWindres += $_.Source
+}
 if (-not $env:WINDRES) {
-    $candidates = @(
-        (Get-Command windres -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source),
-        "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe\mingw64\bin\windres.exe"
-    )
-    foreach ($c in $candidates) {
-        if ($c -and (Test-Path $c)) {
-            $env:WINDRES = $c
-            $binDir = Split-Path $c -Parent
-            $env:Path = "$binDir;$env:Path"
-            break
-        }
+    foreach ($c in $preferWindres) {
+        if (-not $c -or -not (Test-Path $c)) { continue }
+        if ($c -match 'LLVM-MinGW|llvm-mingw') { continue }
+        $env:WINDRES = $c
+        $binDir = Split-Path $c -Parent
+        # Put matching MinGW bin first so the linker matches windres (GNU ld).
+        $env:Path = "$binDir;$env:Path"
+        break
     }
 }
-if ($env:WINDRES) { Write-Host "    windres: $env:WINDRES" }
+if ($env:WINDRES) {
+    Write-Host "    windres: $env:WINDRES"
+} else {
+    Write-Host "    warning: no GNU windres found — exe may lack app icon"
+}
 cargo build --release
 if ($LASTEXITCODE -ne 0) { throw "cargo build --release failed ($LASTEXITCODE)" }
 

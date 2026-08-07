@@ -124,9 +124,17 @@ fn build_windows_resources(manifest: &Path, out_dir: &Path) {
 
     match status {
         Ok(s) if s.success() && res_obj.is_file() => {
-            // Link resource object into the final PE (Explorer / taskbar icon).
-            println!("cargo:rustc-link-arg={}", res_obj.display());
-            println!("cargo:warning=embedded Windows icon via {}", windres.display());
+            // Link resource object into binary only (Explorer / taskbar icon).
+            // bins-only: avoid attaching .rsrc to the rlib unnecessarily.
+            println!("cargo:rustc-link-arg-bins={}", res_obj.display());
+            if is_llvm_mingw_path(&windres) {
+                println!(
+                    "cargo:warning=using LLVM windres ({}); icons may not embed with GNU ld — prefer WinLibs/binutils windres",
+                    windres.display()
+                );
+            } else {
+                println!("cargo:warning=embedded Windows icon via {}", windres.display());
+            }
         }
         Ok(s) => {
             println!(
@@ -144,11 +152,20 @@ fn build_windows_resources(manifest: &Path, out_dir: &Path) {
     }
 }
 
+/// LLVM-MinGW's windres (lld-based) often produces .rsrc that GNU ld does not
+/// merge into a valid PE resource tree — Explorer then shows the default icon.
+fn is_llvm_mingw_path(path: &Path) -> bool {
+    let s = path.to_string_lossy();
+    s.contains("LLVM-MinGW") || s.contains("llvm-mingw") || s.contains("llvm\\bin")
+}
+
 fn find_windres() -> PathBuf {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
     if let Ok(p) = env::var("WINDRES") {
         let pb = PathBuf::from(&p);
         if pb.is_file() {
-            return pb;
+            candidates.push(pb);
         }
     }
     // Prefer windres next to the C compiler when using gnu toolchain.
@@ -158,18 +175,18 @@ fn find_windres() -> PathBuf {
             for name in ["windres.exe", "windres"] {
                 let candidate = dir.join(name);
                 if candidate.is_file() {
-                    return candidate;
+                    candidates.push(candidate);
                 }
             }
         }
     }
-    // `where windres` (Windows) / `which` not needed if on PATH.
+    // All `where windres` hits (order = PATH order).
     if let Ok(out) = Command::new("where.exe").arg("windres").output() {
         if out.status.success() {
-            if let Some(line) = String::from_utf8_lossy(&out.stdout).lines().next() {
+            for line in String::from_utf8_lossy(&out.stdout).lines() {
                 let p = PathBuf::from(line.trim());
                 if p.is_file() {
-                    return p;
+                    candidates.push(p);
                 }
             }
         }
@@ -180,35 +197,40 @@ fn find_windres() -> PathBuf {
         if let Ok(entries) = fs::read_dir(&winget) {
             for ent in entries.flatten() {
                 let name = ent.file_name().to_string_lossy().to_string();
-                if !(name.contains("WinLibs") || name.contains("mingw") || name.contains("MinGW") || name.contains("LLVM-MinGW"))
+                if !(name.contains("WinLibs")
+                    || name.contains("mingw")
+                    || name.contains("MinGW")
+                    || name.contains("LLVM-MinGW"))
                 {
                     continue;
                 }
-                for sub in [
-                    "mingw64\\bin\\windres.exe",
-                    "bin\\windres.exe",
-                    // llvm-mingw unpack layout
-                ] {
+                for sub in ["mingw64\\bin\\windres.exe", "bin\\windres.exe"] {
                     let cand = ent.path().join(sub);
                     if cand.is_file() {
-                        return cand;
+                        candidates.push(cand);
                     }
                 }
                 // Nested versioned folder (llvm-mingw-*-ucrt-x86_64\bin\windres.exe)
                 if let Ok(walk) = fs::read_dir(ent.path()) {
                     for inner in walk.flatten() {
-                        let cand = inner.path().join("bin\\windres.exe");
-                        if cand.is_file() {
-                            return cand;
-                        }
-                        let cand = inner.path().join("mingw64\\bin\\windres.exe");
-                        if cand.is_file() {
-                            return cand;
+                        for sub in ["bin\\windres.exe", "mingw64\\bin\\windres.exe"] {
+                            let cand = inner.path().join(sub);
+                            if cand.is_file() {
+                                candidates.push(cand);
+                            }
                         }
                     }
                 }
             }
         }
+    }
+
+    // Prefer GNU/binutils windres (WinLibs etc.) over LLVM-MinGW.
+    if let Some(p) = candidates.iter().find(|p| !is_llvm_mingw_path(p)) {
+        return p.clone();
+    }
+    if let Some(p) = candidates.first() {
+        return p.clone();
     }
     PathBuf::from("windres.exe")
 }
