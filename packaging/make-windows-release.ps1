@@ -54,14 +54,16 @@ Copy-Item (Join-Path $Root 'helpers\windows\Get-LiveCaptionsText.ps1') (Join-Pat
 # Also put helper next to the exe for simplest discovery
 Copy-Item (Join-Path $Root 'helpers\windows\Get-LiveCaptionsText.ps1') (Join-Path $Dist 'Get-LiveCaptionsText.ps1')
 Copy-Item (Join-Path $Root 'README.md') (Join-Path $Dist 'README.md')
-if (Test-Path (Join-Path $Root 'assets\logo.png')) {
+# Windows pack branding: prefer the cleaned symbol (logo-256). Leave Mac assets
+# (logo.png / logo-1024.png / Interpres.icns) alone for the Mac workflow.
+if (Test-Path (Join-Path $Root 'assets\logo-256.png')) {
+    Copy-Item (Join-Path $Root 'assets\logo-256.png') (Join-Path $Dist 'logo-256.png')
+    Copy-Item (Join-Path $Root 'assets\logo-256.png') (Join-Path $Dist 'logo.png')
+} elseif (Test-Path (Join-Path $Root 'assets\logo.png')) {
     Copy-Item (Join-Path $Root 'assets\logo.png') (Join-Path $Dist 'logo.png')
 }
 if (Test-Path (Join-Path $Root 'assets\Interpres.ico')) {
     Copy-Item (Join-Path $Root 'assets\Interpres.ico') (Join-Path $Dist 'Interpres.ico')
-}
-if (Test-Path (Join-Path $Root 'assets\logo-256.png')) {
-    Copy-Item (Join-Path $Root 'assets\logo-256.png') (Join-Path $Dist 'logo-256.png')
 }
 
 $openBat = @'
