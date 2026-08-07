@@ -35,7 +35,7 @@ if (-not $env:WINDRES) {
 if ($env:WINDRES) {
     Write-Host "    windres: $env:WINDRES"
 } else {
-    Write-Host "    warning: no GNU windres found — exe may lack app icon"
+    Write-Host "    warning: no GNU windres found - exe may lack app icon"
 }
 cargo build --release
 if ($LASTEXITCODE -ne 0) { throw "cargo build --release failed ($LASTEXITCODE)" }
