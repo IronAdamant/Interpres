@@ -1,4 +1,10 @@
 //! Interpres — native UI (default on Mac) + CLI. Zero crates.io dependencies.
+//!
+//! Windows: linked as a GUI-subsystem PE so double-click does not open a console.
+//! CLI commands attach/allocate a console only when actually needed.
+
+// No black console flash when opening the native window (Explorer double-click).
+#![cfg_attr(windows, windows_subsystem = "windows")]
 
 use interpres::buffer::{BufferEmit, CaptionBuffer};
 use interpres::config::Config;
@@ -20,10 +26,12 @@ use std::time::{Duration, SystemTime};
 
 fn main() {
     let mut args: Vec<String> = env::args().skip(1).collect();
+    let mut forced_cli = false;
 
     // Allow `interpres cli …` to force command-line mode.
     if args.first().map(|a| a.as_str()) == Some("cli") {
         args.remove(0);
+        forced_cli = true;
     } else {
         // Non-technical default: open the native window (Win32 / AppKit).
         // Double-click also lands here (no args, or INTERPRES_FRIENDLY / INTERPRES_GUI).
@@ -64,6 +72,7 @@ fn main() {
                         || args[0] == "gui"
                         || is_cli_cmd != Some(true)
                     {
+                        // GUI path: windows_subsystem = "windows" → no console at all.
                         std::process::exit(gui::run_native_gui());
                     }
                 }
@@ -78,6 +87,9 @@ fn main() {
     }
 
     if args.is_empty() {
+        // Bare `interpres cli` with no subcommand → help then run.
+        #[cfg(windows)]
+        win_console::ensure_for_cli("help");
         print_help();
         args.push("run".into());
     }
@@ -85,8 +97,27 @@ fn main() {
     let cmd = args[0].as_str();
     let rest: Vec<&str> = args[1..].iter().map(|s| s.as_str()).collect();
 
+    // `gui` is still a window — no CLI console.
+    if cmd == "gui" {
+        std::process::exit(gui::run_native_gui());
+    }
+
+    // Real CLI work: attach to parent terminal or open a console with a short intro.
+    #[cfg(windows)]
+    {
+        let label = if forced_cli {
+            format!("cli {cmd}")
+        } else {
+            cmd.to_string()
+        };
+        win_console::ensure_for_cli(&label);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = forced_cli;
+    }
+
     let code = match cmd {
-        "gui" => gui::run_native_gui(),
         "help" | "-h" | "--help" => {
             print_help();
             0
@@ -113,6 +144,149 @@ fn main() {
     std::process::exit(code);
 }
 
+/// Windows-only: GUI-subsystem PE needs care for CLI I/O.
+///
+/// Double-click → no console (subsystem). From cmd/PowerShell or a .bat, stdout is often
+/// already a valid pipe/console handle — leave it alone. Only Attach/Alloc when orphaned.
+#[cfg(windows)]
+mod win_console {
+    use std::ffi::c_void;
+    use std::io::{self, Write};
+    use std::ptr;
+
+    const ATTACH_PARENT_PROCESS: u32 = 0xFFFF_FFFF;
+    const STD_INPUT_HANDLE: u32 = 0xFFFF_FFF6; // (u32)-10
+    const STD_OUTPUT_HANDLE: u32 = 0xFFFF_FFF5; // (u32)-11
+    const STD_ERROR_HANDLE: u32 = 0xFFFF_FFF4; // (u32)-12
+    const GENERIC_READ: u32 = 0x8000_0000;
+    const GENERIC_WRITE: u32 = 0x4000_0000;
+    const FILE_SHARE_READ: u32 = 0x0000_0001;
+    const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+    const OPEN_EXISTING: u32 = 3;
+    const INVALID_HANDLE_VALUE: *mut c_void = -1isize as *mut c_void;
+    const FILE_TYPE_UNKNOWN: u32 = 0x0000;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn AttachConsole(pid: u32) -> i32;
+        fn AllocConsole() -> i32;
+        fn SetConsoleTitleW(title: *const u16) -> i32;
+        fn SetStdHandle(n: u32, h: *mut c_void) -> i32;
+        fn GetStdHandle(n: u32) -> *mut c_void;
+        fn GetFileType(h: *mut c_void) -> u32;
+        fn CreateFileW(
+            name: *const u16,
+            access: u32,
+            share: u32,
+            sec: *mut c_void,
+            disposition: u32,
+            flags: u32,
+            template: *mut c_void,
+        ) -> *mut c_void;
+    }
+
+    extern "C" {
+        fn freopen(filename: *const i8, mode: *const i8, stream: *mut c_void) -> *mut c_void;
+        fn __acrt_iob_func(index: u32) -> *mut c_void;
+    }
+
+    fn to_wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    unsafe fn stdout_usable() -> bool {
+        let h = GetStdHandle(STD_OUTPUT_HANDLE);
+        if h.is_null() || h == INVALID_HANDLE_VALUE {
+            return false;
+        }
+        GetFileType(h) != FILE_TYPE_UNKNOWN
+    }
+
+    unsafe fn rebind_to_console_device() {
+        let conout = to_wide("CONOUT$");
+        let conin = to_wide("CONIN$");
+        let h_out = CreateFileW(
+            conout.as_ptr(),
+            GENERIC_WRITE | GENERIC_READ,
+            FILE_SHARE_WRITE | FILE_SHARE_READ,
+            ptr::null_mut(),
+            OPEN_EXISTING,
+            0,
+            ptr::null_mut(),
+        );
+        let h_in = CreateFileW(
+            conin.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            ptr::null_mut(),
+            OPEN_EXISTING,
+            0,
+            ptr::null_mut(),
+        );
+        if h_out != INVALID_HANDLE_VALUE && !h_out.is_null() {
+            SetStdHandle(STD_OUTPUT_HANDLE, h_out);
+            SetStdHandle(STD_ERROR_HANDLE, h_out);
+        }
+        if h_in != INVALID_HANDLE_VALUE && !h_in.is_null() {
+            SetStdHandle(STD_INPUT_HANDLE, h_in);
+        }
+
+        let stdin_s = __acrt_iob_func(0);
+        let stdout_s = __acrt_iob_func(1);
+        let stderr_s = __acrt_iob_func(2);
+        let out = b"CONOUT$\0";
+        let inp = b"CONIN$\0";
+        let w = b"w\0";
+        let r = b"r\0";
+        if !stdout_s.is_null() {
+            freopen(out.as_ptr() as *const i8, w.as_ptr() as *const i8, stdout_s);
+        }
+        if !stderr_s.is_null() {
+            freopen(out.as_ptr() as *const i8, w.as_ptr() as *const i8, stderr_s);
+        }
+        if !stdin_s.is_null() {
+            freopen(inp.as_ptr() as *const i8, r.as_ptr() as *const i8, stdin_s);
+        }
+    }
+
+    /// Ensure CLI can print; only create/attach a console when stdout is missing.
+    pub fn ensure_for_cli(command_label: &str) {
+        let mut allocated_fresh = false;
+        unsafe {
+            if !stdout_usable() {
+                // No inherited pipe/console (e.g. some double-clicked helpers).
+                let attached = AttachConsole(ATTACH_PARENT_PROCESS) != 0;
+                if !attached {
+                    allocated_fresh = AllocConsole() != 0;
+                }
+                rebind_to_console_device();
+                let title = to_wide("Interpres - command line");
+                SetConsoleTitleW(title.as_ptr());
+            }
+        }
+
+        // Explain what is running (quiet one-liner when already in a terminal).
+        if allocated_fresh {
+            let _ = writeln!(
+                io::stdout(),
+                "Interpres - command line mode\n\
+                 Running: interpres {command_label}\n\
+                 \n\
+                 This window is only for advanced commands (probe, diagnose, demo, ...).\n\
+                 For normal use: double-click interpres.exe (app window only, no console).\n\
+                 Need help: interpres help\n\
+                 ----------------------------------------"
+            );
+        } else {
+            let _ = writeln!(
+                io::stdout(),
+                "Interpres CLI - running: interpres {command_label}"
+            );
+        }
+        let _ = io::stdout().flush();
+    }
+}
+
 fn print_help() {
     #[cfg(windows)]
     {
@@ -122,10 +296,10 @@ fn print_help() {
 Not a speech engine. Requires Windows Live Captions (Win+Ctrl+L). Cannot work alone.
 Cannot guarantee 100% accuracy — only that captions can be saved when LC works.
 
-Easy: download a Release pack, open interpres.exe, Start listening.
+Easy: download a Release pack, double-click interpres.exe (app window only — no console).
 Optional: Save to disk ON. Keep Get-LiveCaptionsText.ps1 next to the exe.
 
-Commands (advanced):
+Commands (advanced — these print here in the terminal):
   gui | run | probe | diagnose | set-folder | remember | demo | help | cli
 
 Zero crates.io dependencies. Free & open source. 100% local.
