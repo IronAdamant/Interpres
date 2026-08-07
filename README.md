@@ -12,11 +12,20 @@ It works **with** the Live Captions your computer already has, and can **save** 
 
 No subscription. No cloud account. No paid product. Everything stays **on your computer** unless **you** copy the files somewhere else.
 
-<p align="center">
-  <img src="assets/screenshot-windows.png" alt="Interpres on Windows — native companion window with Start listening, Save to disk, Live and Session areas" width="720" />
-</p>
+<p align="center"><em>Same companion UI on both platforms (native Win32 on Windows, native AppKit on Mac) — not a stand-alone captioner; works with OS Live Captions.</em></p>
 
-<p align="center"><em>Windows version (native Win32 window). Mac uses its own native AppKit window. Same idea on both: companion to OS Live Captions, not a stand-alone captioner.</em></p>
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <strong>Windows</strong><br />
+      <img src="assets/screenshot-windows.png" alt="Interpres on Windows — native Win32 companion window with Start listening, Save to disk, Live and Session areas" width="480" />
+    </td>
+    <td align="center" width="50%">
+      <strong>Mac</strong><br />
+      <img src="assets/screenshot-macos.png" alt="Interpres on Mac — native AppKit companion window with Start listening, Save to disk, Theme, Live and Session areas" width="480" />
+    </td>
+  </tr>
+</table>
 
 ---
 
