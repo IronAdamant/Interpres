@@ -54,8 +54,8 @@ Copy-Item (Join-Path $Root 'helpers\windows\Get-LiveCaptionsText.ps1') (Join-Pat
 # Also put helper next to the exe for simplest discovery
 Copy-Item (Join-Path $Root 'helpers\windows\Get-LiveCaptionsText.ps1') (Join-Path $Dist 'Get-LiveCaptionsText.ps1')
 Copy-Item (Join-Path $Root 'README.md') (Join-Path $Dist 'README.md')
-# Windows pack branding: prefer the cleaned symbol (logo-256). Leave Mac assets
-# (logo.png / logo-1024.png / Interpres.icns) alone for the Mac workflow.
+# Windows pack branding: cleaned symbol (logo-256). Mac uses the same mark via
+# logo.png / logo-1024.png / Interpres.icns (regenerated from logo-256).
 if (Test-Path (Join-Path $Root 'assets\logo-256.png')) {
     Copy-Item (Join-Path $Root 'assets\logo-256.png') (Join-Path $Dist 'logo-256.png')
     Copy-Item (Join-Path $Root 'assets\logo-256.png') (Join-Path $Dist 'logo.png')

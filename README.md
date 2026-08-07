@@ -1,7 +1,7 @@
 # Interpres
 
 <p align="center">
-  <img src="assets/logo-256.png" alt="Interpres logo — caption lines and live sound waves" width="128" height="128" />
+  <img src="assets/logo.png" alt="Interpres logo — three caption lines and teal sound waves on dark navy (same mark on Mac and Windows)" width="128" height="128" />
 </p>
 
 **Save what Live Captions already shows — so you can read it again later.**
