@@ -23,12 +23,19 @@ impl PluginHost {
 
     /// Start a helper process; stdout lines become CaptionEvents.
     pub fn start(helper: &Path, args: &[&str]) -> std::io::Result<Self> {
-        let mut child = Command::new(helper)
-            .args(args)
+        let mut cmd = Command::new(helper);
+        cmd.args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
+            .stderr(Stdio::piped());
+        // GUI PE on Windows: avoid a console window for console-subsystem helpers.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let mut child = cmd.spawn()?;
 
         let stdout = child.stdout.take().ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::Other, "helper missing stdout")
@@ -85,7 +92,7 @@ impl Drop for PluginHost {
 pub fn default_helper_path() -> Option<PathBuf> {
     #[cfg(windows)]
     {
-        return crate::platform::windows::find_uia_helper();
+        return crate::platform::windows::resolve_uia_helper();
     }
     #[cfg(target_os = "macos")]
     {

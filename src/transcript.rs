@@ -5,8 +5,22 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::buffer::same_or_refinement;
+use crate::buffer::{prefer_polish, same_or_refinement};
 use crate::session::{format_session_stamp, unique_session_stem};
+
+/// Scan this many trailing caption lines for same-family rewrite.
+const FAMILY_RING_K: usize = 24;
+
+/// Result of attempting a same-family rewrite on disk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RewriteResult {
+    /// Replaced an existing caption line with a preferred polish.
+    Rewrote,
+    /// Same family found but candidate is not preferred (no second line).
+    NoOp,
+    /// No same-family line in the ring — caller may append.
+    NoMatch,
+}
 
 /// Writes one session's captions to a user-chosen folder.
 pub struct TranscriptWriter {
@@ -17,7 +31,7 @@ pub struct TranscriptWriter {
     jsonl: Option<File>,
     source_label: String,
     line_count: u64,
-    /// Last caption body written (for draft→polish rewrite of the same family).
+    /// Physical last caption body on disk (after any write/rewrite/NoOp).
     last_final_text: Option<String>,
 }
 
@@ -85,21 +99,133 @@ impl TranscriptWriter {
         self.line_count
     }
 
-    /// Append a finalized caption line (human TXT + optional JSONL).
-    /// If `text` is a polish of the last written final, rewrite that line instead of duplicating.
+    pub fn last_final_text(&self) -> Option<&str> {
+        self.last_final_text.as_deref()
+    }
+
+    /// Append a finalized caption, or family-rewrite if it polishes an earlier line.
     pub fn write_final(&mut self, clock_hhmmss: &str, text: &str) -> io::Result<()> {
+        self.write_caption(clock_hhmmss, text, false)
+    }
+
+    /// Polish path: same family rewrite rules; still appends only on NoMatch.
+    pub fn write_revised(&mut self, clock_hhmmss: &str, text: &str) -> io::Result<()> {
+        self.write_caption(clock_hhmmss, text, true)
+    }
+
+    fn write_caption(&mut self, clock_hhmmss: &str, text: &str, _from_revised: bool) -> io::Result<()> {
         let text = text.trim();
         if text.is_empty() {
             return Ok(());
         }
-        if let Some(ref last) = self.last_final_text {
-            if same_or_refinement(last, text) && text != last.as_str() {
-                return self.rewrite_last_final(clock_hhmmss, text);
-            }
-            if text == last.as_str() {
-                return Ok(());
+        match self.try_rewrite_family(clock_hhmmss, text)? {
+            RewriteResult::Rewrote | RewriteResult::NoOp => Ok(()),
+            RewriteResult::NoMatch => self.append_caption(clock_hhmmss, text),
+        }
+    }
+
+    /// Family-aware rewrite over the last `FAMILY_RING_K` caption lines.
+    fn try_rewrite_family(&mut self, clock_hhmmss: &str, text: &str) -> io::Result<RewriteResult> {
+        let raw = fs::read_to_string(&self.txt_path)?;
+        let lines: Vec<String> = raw.lines().map(|l| l.to_string()).collect();
+        let caption_idxs: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| is_caption_line(l))
+            .map(|(i, _)| i)
+            .collect();
+        if caption_idxs.is_empty() {
+            return Ok(RewriteResult::NoMatch);
+        }
+
+        let scan_from = caption_idxs.len().saturating_sub(FAMILY_RING_K);
+        // Most-recent family match wins.
+        let mut match_pos: Option<(usize, String)> = None;
+        for &line_i in caption_idxs[scan_from..].iter().rev() {
+            let body = caption_body(&lines[line_i]);
+            if same_or_refinement(&body, text) {
+                match_pos = Some((line_i, body));
+                break;
             }
         }
+
+        let Some((line_i, existing)) = match_pos else {
+            return Ok(RewriteResult::NoMatch);
+        };
+
+        if existing == text {
+            self.sync_last_final_from_lines(&lines, &caption_idxs);
+            return Ok(RewriteResult::NoOp);
+        }
+        if !prefer_polish(&existing, text) {
+            self.sync_last_final_from_lines(&lines, &caption_idxs);
+            return Ok(RewriteResult::NoOp);
+        }
+
+        self.rewrite_line_at(line_i, clock_hhmmss, text, &lines, &caption_idxs)?;
+        Ok(RewriteResult::Rewrote)
+    }
+
+    fn rewrite_line_at(
+        &mut self,
+        line_i: usize,
+        clock_hhmmss: &str,
+        text: &str,
+        lines: &[String],
+        caption_idxs: &[usize],
+    ) -> io::Result<()> {
+        use std::io::{Seek, SeekFrom};
+
+        let mut body = String::new();
+        for (i, l) in lines.iter().enumerate() {
+            if i == line_i {
+                body.push_str(&format!("[{clock_hhmmss}] {text}\n"));
+            } else {
+                body.push_str(l);
+                body.push('\n');
+            }
+        }
+        // Preserve trailing newline shape.
+        if !body.ends_with('\n') {
+            body.push('\n');
+        }
+
+        self.txt.set_len(0)?;
+        self.txt.seek(SeekFrom::Start(0))?;
+        self.txt.write_all(body.as_bytes())?;
+        self.txt.flush()?;
+
+        if let Some(ref mut j) = self.jsonl {
+            let esc = json_escape(text);
+            let src = json_escape(&self.source_label);
+            writeln!(
+                j,
+                "{{\"v\":1,\"t\":\"{clock_hhmmss}\",\"kind\":\"revised\",\"src\":\"{src}\",\"text\":\"{esc}\"}}"
+            )?;
+            j.flush()?;
+        }
+
+        // last_final_text = physical last caption body (may not be the rewritten line).
+        let new_lines: Vec<String> = body.lines().map(|l| l.to_string()).collect();
+        let last_i = *caption_idxs.last().unwrap_or(&line_i);
+        if last_i == line_i {
+            self.last_final_text = Some(text.to_string());
+        } else if last_i < new_lines.len() {
+            self.last_final_text = Some(caption_body(&new_lines[last_i]));
+        } else {
+            self.last_final_text = Some(text.to_string());
+        }
+        // line_count unchanged on rewrite.
+        Ok(())
+    }
+
+    fn sync_last_final_from_lines(&mut self, lines: &[String], caption_idxs: &[usize]) {
+        if let Some(&i) = caption_idxs.last() {
+            self.last_final_text = Some(caption_body(&lines[i]));
+        }
+    }
+
+    fn append_caption(&mut self, clock_hhmmss: &str, text: &str) -> io::Result<()> {
         writeln!(self.txt, "[{clock_hhmmss}] {text}")?;
         self.txt.flush()?;
         if let Some(ref mut j) = self.jsonl {
@@ -112,42 +238,6 @@ impl TranscriptWriter {
             j.flush()?;
         }
         self.line_count += 1;
-        self.last_final_text = Some(text.to_string());
-        Ok(())
-    }
-
-    fn rewrite_last_final(&mut self, clock_hhmmss: &str, text: &str) -> io::Result<()> {
-        use std::io::{Seek, SeekFrom};
-
-        let raw = fs::read_to_string(&self.txt_path)?;
-        let mut last_caption_idx: Option<usize> = None;
-        for (i, l) in raw.lines().enumerate() {
-            if l.starts_with('[') && l.contains(']') {
-                last_caption_idx = Some(i);
-            }
-        }
-        let mut body = String::new();
-        for (i, l) in raw.lines().enumerate() {
-            if Some(i) == last_caption_idx {
-                continue;
-            }
-            body.push_str(l);
-            body.push('\n');
-        }
-        body.push_str(&format!("[{clock_hhmmss}] {text}\n"));
-        self.txt.set_len(0)?;
-        self.txt.seek(SeekFrom::Start(0))?;
-        self.txt.write_all(body.as_bytes())?;
-        self.txt.flush()?;
-        if let Some(ref mut j) = self.jsonl {
-            let esc = json_escape(text);
-            let src = json_escape(&self.source_label);
-            writeln!(
-                j,
-                "{{\"v\":1,\"t\":\"{clock_hhmmss}\",\"kind\":\"revised\",\"src\":\"{src}\",\"text\":\"{esc}\"}}"
-            )?;
-            j.flush()?;
-        }
         self.last_final_text = Some(text.to_string());
         Ok(())
     }
@@ -166,6 +256,21 @@ impl TranscriptWriter {
         }
         Ok(())
     }
+}
+
+fn is_caption_line(l: &str) -> bool {
+    let t = l.trim_start();
+    t.starts_with('[') && t.contains(']') && !t.starts_with("#")
+}
+
+fn caption_body(line: &str) -> String {
+    let t = line.trim();
+    if let Some(rest) = t.strip_prefix('[') {
+        if let Some(idx) = rest.find(']') {
+            return rest[idx + 1..].trim().to_string();
+        }
+    }
+    t.to_string()
 }
 
 fn json_escape(s: &str) -> String {
@@ -187,7 +292,6 @@ fn json_escape(s: &str) -> String {
 /// Format HH:MM:SS from SystemTime for line prefixes.
 pub fn format_clock(now: SystemTime) -> String {
     let stamp = format_session_stamp(now);
-    // stamp is YYYY-MM-DD_HH-MM-SS → take time part and use colons
     if let Some(t) = stamp.split('_').nth(1) {
         return t.replace('-', ":");
     }
@@ -199,15 +303,40 @@ mod tests {
     use super::*;
     use std::time::{Duration, UNIX_EPOCH};
 
-    #[test]
-    fn remember_off_writes_nothing() {
-        let dir = std::env::temp_dir().join(format!(
-            "interpres-tr-{}",
+    fn temp_dir(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "interpres-tr-{tag}-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
-        ));
+        ))
+    }
+
+    fn open_writer(dir: &Path) -> TranscriptWriter {
+        TranscriptWriter::begin_session(
+            dir,
+            true,
+            true,
+            "os-lc-test",
+            UNIX_EPOCH + Duration::from_secs(1_700_000_100),
+        )
+        .unwrap()
+        .expect("writer")
+    }
+
+    fn caption_bodies(path: &Path) -> Vec<String> {
+        fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .filter(|l| is_caption_line(l))
+            .map(caption_body)
+            .collect()
+    }
+
+    #[test]
+    fn remember_off_writes_nothing() {
+        let dir = temp_dir("off");
         let w = TranscriptWriter::begin_session(
             &dir,
             false,
@@ -222,22 +351,12 @@ mod tests {
 
     #[test]
     fn one_dated_file_per_session_sticky_folder() {
-        let dir = std::env::temp_dir().join(format!(
-            "interpres-tr-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let t0 = UNIX_EPOCH + Duration::from_secs(1_700_000_100);
-        let mut w = TranscriptWriter::begin_session(&dir, true, true, "os-lc-test", t0)
-            .unwrap()
-            .expect("writer");
+        let dir = temp_dir("sess");
+        let mut w = open_writer(&dir);
         let path1 = w.txt_path().to_path_buf();
         assert!(path1.starts_with(&dir));
         let name = path1.file_name().unwrap().to_string_lossy();
         assert!(name.ends_with(".txt"));
-        // date-time shape in name
         assert!(name.contains('-') && name.contains('_'));
 
         w.write_final("12:00:01", "We can meet on Thursday.")
@@ -256,14 +375,102 @@ mod tests {
         assert!(j.contains("\"kind\":\"final\""));
         assert!(j.contains("We can meet on Thursday."));
 
-        // Second session → different file
-        let t1 = t0 + Duration::from_secs(60);
+        let t1 = UNIX_EPOCH + Duration::from_secs(1_700_000_160);
         let w2 = TranscriptWriter::begin_session(&dir, true, false, "os-lc-test", t1)
             .unwrap()
             .unwrap();
         assert_ne!(w2.txt_path(), path1);
         assert!(w2.txt_path().starts_with(&dir));
 
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn adjacent_rewrite_one_disk_line() {
+        let dir = temp_dir("adj");
+        let mut w = open_writer(&dir);
+        let path = w.txt_path().to_path_buf();
+        w.write_final("12:00:01", "We can meet on Thursday").unwrap();
+        assert_eq!(w.line_count(), 1);
+        w.write_final("12:00:02", "We can meet on Thursday.").unwrap();
+        assert_eq!(w.line_count(), 1, "rewrite must not increment line_count");
+        let bodies = caption_bodies(&path);
+        assert_eq!(bodies.len(), 1);
+        assert_eq!(bodies[0], "We can meet on Thursday.");
+        assert_eq!(w.last_final_text(), Some("We can meet on Thursday."));
+        let j = fs::read_to_string(path.with_extension("jsonl")).unwrap();
+        assert!(j.contains("\"kind\":\"revised\""));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn intervening_family_rewrite_f_g_f_polish_g_polish() {
+        let dir = temp_dir("fg");
+        let mut w = open_writer(&dir);
+        let path = w.txt_path().to_path_buf();
+
+        let f = "I am the owner of Elite Software Automation.";
+        let g = "Second sentence about inventory management.";
+        let f_polish =
+            "I am the owner of Elite Software Automation, and I have been building it for years.";
+        let g_polish =
+            "Second sentence about inventory management and the whole delivery cycle.";
+
+        w.write_final("12:00:01", f).unwrap();
+        w.write_final("12:00:02", g).unwrap();
+        assert_eq!(w.line_count(), 2);
+        assert_eq!(w.last_final_text(), Some(g));
+
+        w.write_revised("12:00:03", f_polish).unwrap();
+        let bodies = caption_bodies(&path);
+        assert_eq!(bodies.len(), 2, "must not append a third line for F polish");
+        assert!(bodies[0].contains("building it for years"));
+        assert_eq!(bodies[1], g);
+        // Physical last caption body is still G (not F polish).
+        assert_eq!(w.last_final_text(), Some(g));
+        assert_eq!(w.line_count(), 2);
+
+        w.write_revised("12:00:04", g_polish).unwrap();
+        let bodies = caption_bodies(&path);
+        assert_eq!(bodies.len(), 2);
+        assert!(bodies[0].contains("building it for years"));
+        assert!(bodies[1].contains("delivery cycle"));
+        assert_eq!(w.last_final_text(), Some(g_polish));
+        assert_eq!(w.line_count(), 2);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn shorter_same_family_scrap_is_noop() {
+        let dir = temp_dir("scrap");
+        let mut w = open_writer(&dir);
+        let path = w.txt_path().to_path_buf();
+        let long = "And your purpose and your role, if you do get this job, will be to actually figure this out, to figure out what is actually going on there.";
+        w.write_final("12:00:01", long).unwrap();
+        w.write_final("12:00:02", "And your purpose and your role").unwrap();
+        let bodies = caption_bodies(&path);
+        assert_eq!(bodies.len(), 1);
+        assert!(bodies[0].contains("going on there"));
+        assert_eq!(w.line_count(), 1);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn write_revised_on_shipped_path_rewrites() {
+        // Drive the public write_revised API (engine uses this for BufferEmit::Revised).
+        let dir = temp_dir("rev");
+        let mut w = open_writer(&dir);
+        let path = w.txt_path().to_path_buf();
+        w.write_final("12:00:01", "Thank you for watching this video").unwrap();
+        w.write_revised(
+            "12:00:02",
+            "Thank you for watching this video. If you feel like this is for you, continue.",
+        )
+        .unwrap();
+        let bodies = caption_bodies(&path);
+        assert_eq!(bodies.len(), 1);
+        assert!(bodies[0].contains("continue"));
         let _ = fs::remove_dir_all(dir);
     }
 }

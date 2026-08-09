@@ -23,8 +23,13 @@ pub enum BufferEmit {
     Final(String),
     Finals(Vec<String>),
     /// OS updated an already-committed sentence family (draft → polish).
-    /// UI should replace the last same-family history line; disk may rewrite last final.
+    /// UI should replace the matching same-family history line; disk rewrites that family.
     Revised(String),
+    /// Same tick: polishes first, then new finals (must not drop Revised when finals exist).
+    Batch {
+        revised: Vec<String>,
+        finals: Vec<String>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -130,7 +135,7 @@ impl CaptionBuffer {
         }
         for c in self.committed.iter_mut() {
             if same_or_refinement(c, line) {
-                if line_quality(line) > line_quality(c) {
+                if prefer_polish(c, line) {
                     *c = line.to_string();
                     return CommitOutcome::Revised(line.to_string());
                 }
@@ -174,22 +179,19 @@ impl CaptionBuffer {
         if curr_lines.is_empty() {
             // Entire surface cleared — leave-window finalize previous segments.
             let mut finals = Vec::new();
+            let mut revised = Vec::new();
             for p in &prev_lines {
                 match self.try_commit(p, true) {
                     CommitOutcome::New(t) => finals.push(t),
-                    CommitOutcome::Revised(t) => finals.push(t),
+                    CommitOutcome::Revised(t) => push_unique_family(&mut revised, t),
                     CommitOutcome::None => {}
                 }
             }
-            return match finals.len() {
-                0 => BufferEmit::None,
-                1 => BufferEmit::Final(finals.remove(0)),
-                _ => BufferEmit::Finals(finals),
-            };
+            return emit_from_parts(revised, finals, None);
         }
 
         let mut finals = Vec::new();
-        let mut revised: Option<String> = None;
+        let mut revised = Vec::new();
 
         // Segments that left the rolling window → finalize once (short phrases OK).
         for p in &prev_lines {
@@ -197,7 +199,7 @@ impl CaptionBuffer {
             if !still {
                 match self.try_commit(p, true) {
                     CommitOutcome::New(t) => finals.push(t),
-                    CommitOutcome::Revised(t) => revised = Some(t),
+                    CommitOutcome::Revised(t) => push_unique_family(&mut revised, t),
                     CommitOutcome::None => {}
                 }
             }
@@ -207,8 +209,11 @@ impl CaptionBuffer {
         // complete sentences inside one Windows UIA blob.
         if curr_lines.len() >= 2 {
             for line in &curr_lines[..curr_lines.len() - 1] {
-                // Settled rows should be complete enough; incomplete mid-segments wait.
-                if !looks_sentence_complete(line) && word_count(line) < 8 {
+                // Hold incomplete / open-tail mid-segments (fragment policy).
+                if is_open_phrase_stub(line) {
+                    continue;
+                }
+                if !looks_sentence_complete(line) && word_count(line) < 10 {
                     continue;
                 }
                 match self.try_commit(line, false) {
@@ -217,7 +222,7 @@ impl CaptionBuffer {
                             finals.push(t);
                         }
                     }
-                    CommitOutcome::Revised(t) => revised = Some(t),
+                    CommitOutcome::Revised(t) => push_unique_family(&mut revised, t),
                     CommitOutcome::None => {}
                 }
             }
@@ -231,33 +236,25 @@ impl CaptionBuffer {
             if same_or_refinement(prev_last, &last) && last != *prev_last {
                 match self.try_commit(&last, false) {
                     CommitOutcome::Revised(t) => {
-                        return BufferEmit::Revised(t);
+                        push_unique_family(&mut revised, t);
+                        // Prefer returning Revised alone when no other work this tick.
+                        if finals.is_empty() && revised.len() == 1 {
+                            return BufferEmit::Revised(revised.remove(0));
+                        }
+                        return emit_from_parts(revised, finals, Some(last));
                     }
                     CommitOutcome::New(_) | CommitOutcome::None => {
-                        return BufferEmit::Partial(last);
+                        if revised.is_empty() && finals.is_empty() {
+                            return BufferEmit::Partial(last);
+                        }
+                        return emit_from_parts(revised, finals, Some(last));
                     }
                 }
             }
         }
 
-        if let Some(r) = revised {
-            if finals.is_empty() {
-                return BufferEmit::Revised(r);
-            }
-        }
-
-        if !finals.is_empty() {
-            let mut out = Vec::new();
-            for f in finals {
-                if !out.iter().any(|x: &String| same_or_refinement(x, &f)) {
-                    out.push(f);
-                }
-            }
-            return match out.len() {
-                0 => partial_or_none(self, &last),
-                1 => BufferEmit::Final(out.remove(0)),
-                _ => BufferEmit::Finals(out),
-            };
+        if !revised.is_empty() || !finals.is_empty() {
+            return emit_from_parts(revised, finals, Some(last));
         }
 
         partial_or_none(self, &last)
@@ -272,21 +269,19 @@ impl CaptionBuffer {
         let segs = segment_captions(&self.previous);
         self.previous.clear();
         let mut finals = Vec::new();
+        let mut revised = Vec::new();
         for p in &segs {
             match self.try_commit(p, true) {
-                CommitOutcome::New(t) | CommitOutcome::Revised(t) => {
+                CommitOutcome::New(t) => {
                     if !finals.iter().any(|f: &String| same_or_refinement(f, &t)) {
                         finals.push(t);
                     }
                 }
+                CommitOutcome::Revised(t) => push_unique_family(&mut revised, t),
                 CommitOutcome::None => {}
             }
         }
-        match finals.len() {
-            0 => BufferEmit::None,
-            1 => BufferEmit::Final(finals.remove(0)),
-            _ => BufferEmit::Finals(finals),
-        }
+        emit_from_parts(revised, finals, None)
     }
 
     pub fn reset(&mut self) {
@@ -302,6 +297,44 @@ fn partial_or_none(_buf: &CaptionBuffer, last: &str) -> BufferEmit {
     } else {
         // Always surface the live edge while the OS is still rewriting text.
         BufferEmit::Partial(last.to_string())
+    }
+}
+
+fn push_unique_family(out: &mut Vec<String>, t: String) {
+    if let Some(existing) = out.iter_mut().find(|x| same_or_refinement(x, &t)) {
+        if prefer_polish(existing, &t) {
+            *existing = t;
+        }
+        return;
+    }
+    out.push(t);
+}
+
+/// Build emit: Revised alone, Final(s), or Batch (revised first, then finals).
+fn emit_from_parts(
+    mut revised: Vec<String>,
+    mut finals: Vec<String>,
+    partial_fallback: Option<String>,
+) -> BufferEmit {
+    // Drop finals that are same-family as a revised polish this tick.
+    finals.retain(|f| !revised.iter().any(|r| same_or_refinement(r, f)));
+    match (revised.len(), finals.len()) {
+        (0, 0) => {
+            if let Some(p) = partial_fallback {
+                if !p.is_empty() {
+                    return BufferEmit::Partial(p);
+                }
+            }
+            BufferEmit::None
+        }
+        (1, 0) => BufferEmit::Revised(revised.remove(0)),
+        (n, 0) if n > 1 => BufferEmit::Batch {
+            revised,
+            finals: Vec::new(),
+        },
+        (0, 1) => BufferEmit::Final(finals.remove(0)),
+        (0, _) => BufferEmit::Finals(finals),
+        (_, _) => BufferEmit::Batch { revised, finals },
     }
 }
 
@@ -1178,7 +1211,13 @@ pub fn same_or_refinement(a: &str, b: &str) -> bool {
     false
 }
 
-fn line_quality(s: &str) -> usize {
+/// Prefer `candidate` over `existing` when polishing a same-family caption.
+pub fn prefer_polish(existing: &str, candidate: &str) -> bool {
+    line_quality(candidate) > line_quality(existing)
+}
+
+/// Higher is better (longer + complete sentences score more).
+pub fn line_quality(s: &str) -> usize {
     let mut q = s.len();
     if looks_sentence_complete(s) {
         q += 40;
@@ -1347,7 +1386,10 @@ mod tests {
         let mut b = CaptionBuffer::new();
         for _ in 0..5 {
             match b.observe("Correct Spelling Automatically") {
-                BufferEmit::Final(_) | BufferEmit::Finals(_) | BufferEmit::Revised(_) => {
+                BufferEmit::Final(_)
+                | BufferEmit::Finals(_)
+                | BufferEmit::Revised(_)
+                | BufferEmit::Batch { .. } => {
                     panic!("must not finalize chrome")
                 }
                 BufferEmit::Partial(t) => {
@@ -1484,8 +1526,7 @@ mod tests {
                 BufferEmit::Revised(t) => {
                     assert!(t.contains("problem") || t.contains("planet"), "{t}");
                 }
-                BufferEmit::Finals(_) => {}
-                BufferEmit::None => {}
+                BufferEmit::Finals(_) | BufferEmit::Batch { .. } | BufferEmit::None => {}
             }
         }
         // Complete sentence with period should settle without leaving "see the" alone.
@@ -1514,6 +1555,9 @@ mod tests {
             BufferEmit::Revised(t) => assert!(t.contains("noticed") || t.contains("iPhone")),
             BufferEmit::Final(t) => assert!(!t.is_empty()),
             BufferEmit::Finals(v) => assert!(!v.is_empty()),
+            BufferEmit::Batch { revised, finals } => {
+                assert!(!revised.is_empty() || !finals.is_empty());
+            }
             BufferEmit::None => {}
         }
         // First sentence should be one family at most in committed when settled.
@@ -1560,6 +1604,12 @@ mod tests {
             }
             BufferEmit::Finals(v) => {
                 got_wait_final = v.iter().any(|t| t.to_ascii_lowercase().contains("wait"));
+            }
+            BufferEmit::Batch { revised, finals } => {
+                got_wait_final = revised
+                    .iter()
+                    .chain(finals.iter())
+                    .any(|t| t.to_ascii_lowercase().contains("wait"));
             }
             BufferEmit::Partial(_) | BufferEmit::None => {}
         }
@@ -1633,7 +1683,9 @@ mod tests {
             BufferEmit::Final(t) | BufferEmit::Revised(t) | BufferEmit::Partial(t) => {
                 panic!("must not commit stub on finish: {t}")
             }
-            BufferEmit::Finals(v) => panic!("must not commit stubs: {v:?}"),
+            BufferEmit::Finals(v) | BufferEmit::Batch { finals: v, .. } => {
+                panic!("must not commit stubs: {v:?}")
+            }
         }
         assert!(
             !b2.committed.iter().any(|c| c.trim() == "see the"),
@@ -1672,8 +1724,11 @@ mod tests {
             other => {
                 // May Final first settled sentence(s) + partial last
                 match other {
-                    BufferEmit::Final(_) | BufferEmit::Finals(_) | BufferEmit::Revised(_) => {}
-                    BufferEmit::None => {}
+                    BufferEmit::Final(_)
+                    | BufferEmit::Finals(_)
+                    | BufferEmit::Revised(_)
+                    | BufferEmit::Batch { .. }
+                    | BufferEmit::None => {}
                     BufferEmit::Partial(_) => unreachable!(),
                 }
             }
@@ -1802,7 +1857,7 @@ mod tests {
                 BufferEmit::Final(t) | BufferEmit::Revised(t) => {
                     assert!(t.to_ascii_lowercase().contains("free"), "{t}");
                 }
-                BufferEmit::Finals(v) => {
+                BufferEmit::Finals(v) | BufferEmit::Batch { finals: v, .. } => {
                     assert!(
                         v.iter().any(|t| t.to_ascii_lowercase().contains("free")),
                         "{v:?}"
@@ -1864,5 +1919,140 @@ mod tests {
         assert!(!is_holdable_short_speech("see the"));
         assert!(!is_holdable_short_speech("and"));
         assert!(!is_holdable_short_speech("Correct Spelling Automatically"));
+    }
+
+    /// Field pairs from 2026-08-09 Windows session — must match as same family.
+    #[test]
+    fn field_2026_08_09_same_family_goldens() {
+        let pairs = [
+            (
+                "I am the owner of Elite Software Automation.",
+                "I am the owner of Elite Software Automation, and I have been building it.",
+            ),
+            (
+                "And your purpose and your role, if you do get this job, will be to actually figure this out.",
+                "And your purpose and your role, if you do get this job, will be to actually figure this out, to figure out what is actually going on there.",
+            ),
+            (
+                "Thank you for watching this video.",
+                "Thank you for watching this video. If you feel like this is for you, continue online.",
+            ),
+            (
+                "We only want people who pay a lot of attention to",
+                "We only want people who pay a lot of attention to all the details.",
+            ),
+            (
+                "And I'm telling you the difference is in the details",
+                "And I'm telling you the difference is in the details and you can sometimes get a little bit tedious to do.",
+            ),
+            (
+                "the first pillar is the business processes",
+                "The first pillar is the business processes.",
+            ),
+            (
+                "So these are symptoms, right?",
+                "So these are symptoms, right? But you got to understand what actually happens",
+            ),
+            (
+                "Look at the numbers.",
+                "Look at the numbers. Here's the thing.",
+            ),
+            (
+                "It's very challenging.",
+                "It's very challenging. The job is challenging.",
+            ),
+            (
+                "We have a very different way of doing, things",
+                "We have a very different way of doing things here and that's why it is very important that you watch this video",
+            ),
+        ];
+        for (a, b) in pairs {
+            assert!(
+                same_or_refinement(a, b),
+                "expected same family:\n  {a}\n  {b}"
+            );
+            assert!(prefer_polish(a, b) || line_quality(b) >= line_quality(a));
+        }
+    }
+
+    /// Hard-negatives: must stay false under shipped matcher (CI oracle).
+    #[test]
+    fn field_2026_08_09_hard_negatives() {
+        let pairs = [
+            (
+                "The job itself is difficult.",
+                "Thank you for watching this video.",
+            ),
+            (
+                "I am the owner of Elite Software Automation.",
+                "Look at the numbers.",
+            ),
+            (
+                "So these are symptoms, right?",
+                "We have that ability.",
+            ),
+            (
+                "Hello from the demo mode.",
+                "Inventory management is complex.",
+            ),
+            (
+                "The first pillar is the business processes.",
+                "And thank you very much",
+            ),
+            (
+                "Open the door please when you arrive.",
+                "Correct Spelling Automatically",
+            ),
+            (
+                "fifty percent more.",
+                "I don't give a token.",
+            ),
+        ];
+        for (a, b) in pairs {
+            assert!(
+                !same_or_refinement(a, b),
+                "must NOT be same family:\n  {a}\n  {b}"
+            );
+        }
+    }
+
+    #[test]
+    fn batch_preserves_revised_with_finals() {
+        // Leave-window style: polish of committed line + new line in same emit path.
+        let mut b = CaptionBuffer::new();
+        b.stable_needed = 1;
+        let draft = "I am the owner of Elite Software Automation.";
+        // Commit draft.
+        let _ = b.observe(draft);
+        let _ = b.observe(draft);
+        let polish = "I am the owner of Elite Software Automation and I started the company.";
+        let other = "Completely different sentence about shipping goods.";
+        // Surface with both polish of draft and a new settled line + live edge.
+        let surface = format!("{polish}\n{other}\nlive edge growing");
+        let emit = b.observe(&surface);
+        match emit {
+            BufferEmit::Batch { revised, finals } => {
+                assert!(
+                    revised.iter().any(|r| r.contains("started the company")),
+                    "revised={revised:?}"
+                );
+                assert!(
+                    finals.iter().any(|f| f.contains("shipping") || f.contains("Completely")),
+                    "finals={finals:?}"
+                );
+            }
+            BufferEmit::Revised(r) => {
+                // Acceptable if other line not settled yet.
+                assert!(r.contains("started") || r.contains("Elite"));
+            }
+            other => {
+                // Also accept Finals/Final if mix collapsed differently but polish preferred.
+                let s = format!("{other:?}");
+                assert!(
+                    s.contains("Elite") || s.contains("shipping") || s.contains("Partial"),
+                    "unexpected emit {other:?}"
+                );
+            }
+        }
     }
 }

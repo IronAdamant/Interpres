@@ -11,6 +11,7 @@ pub mod engine;
 pub mod gui;
 #[cfg(windows)]
 pub mod gui_win;
+pub mod history_ui;
 pub mod lifecycle;
 pub mod platform;
 pub mod plugin_host;

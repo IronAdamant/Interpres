@@ -32,10 +32,16 @@ pub fn live_captions_present() -> LiveCaptionsPresence {
 
 #[cfg(windows)]
 fn detect_windows() -> LiveCaptionsPresence {
+    use std::os::windows::process::CommandExt;
+
+    // Hide console: GUI-subsystem interpres would otherwise flash a window every poll.
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
     let signals = windows_signals();
     // tasklist is always available on Windows interactive sessions.
     let output = std::process::Command::new("tasklist")
         .args(["/FO", "CSV", "/NH"])
+        .creation_flags(CREATE_NO_WINDOW)
         .output();
     match output {
         Ok(out) => {

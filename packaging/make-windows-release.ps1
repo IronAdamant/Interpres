@@ -127,42 +127,47 @@ $startHere = @"
 Interpres - Windows portable pack
 
 WHAT THIS IS
-  A free helper that can save Windows Live Captions as text files.
-  Open source (MIT OR Apache-2.0). Everything stays on your PC.
+  Free helper that can SAVE Windows Live Captions as text files.
+  Not a captioner by itself. Everything stays on your PC.
 
-EASY START
+EASY START (no tech skills needed)
   1. Turn on Live Captions:  Win + Ctrl + L
-  2. Double-click  interpres.exe  (or Open Interpres.bat)
-     -> a normal Windows window opens (buttons + live text)
-  3. Press Start listening; optional Save to disk / Choose folder
-     Files go to: Documents\Interpres Transcripts
+  2. Play audio so captions appear on screen
+  3. Double-click  interpres.exe  (or Open Interpres.bat)
+  4. Press Start listening
+  5. Optional: Save to disk ON, Choose folder
+     Default folder: Documents\Interpres Transcripts
+
+TIPS
+  - You should NOT see terminal windows pop up while listening.
+  - Get-LiveCaptionsText.ps1 is included (and the app can recreate it if missing).
+  - Wrong words in the file usually mean Live Captions misheard them.
 
 ALSO TRY
-  Try demo.bat                          sample transcript (no Live Captions)
-  Check Live Captions (probe).bat       is Live Captions running?
-  Diagnose.bat                          helper / window details
+  Try demo.bat                     sample text without Live Captions
+  Check Live Captions (probe).bat  is Live Captions running?
+  Diagnose.bat                     more detail if capture fails
 
-IMPORTANT
-  Keep Get-LiveCaptionsText.ps1 in this folder (already included).
-  Interpres reads the Live Captions window via UI Automation - it is not
-  a cloud speech service.
-
-ADVANCED (terminal)
-  interpres.exe run
+ADVANCED (optional terminal)
   interpres.exe probe
   interpres.exe diagnose
   interpres.exe remember on
   interpres.exe set-folder "D:\My Captions"
-
-BUILD
-  cargo build --release
-  packaging\make-windows-release.ps1
 "@
 Set-Content -Path (Join-Path $Dist 'START HERE.txt') -Value $startHere -Encoding UTF8
 
-# Checksums
+# Checksums + source stamp
 $Hash = (Get-FileHash -Algorithm SHA256 $ExeSrc).Hash.ToLowerInvariant()
 Set-Content -Path (Join-Path $Dist 'SHA256SUMS.txt') -Value "SHA256  interpres.exe`r`n$Hash" -Encoding ASCII
+
+$commit = ''
+try {
+    $commit = (git -C $Root rev-parse HEAD 2>$null).Trim()
+} catch { }
+if (-not $commit) { $commit = 'unknown' }
+Set-Content -Path (Join-Path $Dist 'SOURCE_COMMIT.txt') -Value $commit -Encoding ASCII
+Set-Content -Path (Join-Path $Root 'dist\SOURCE_COMMIT-windows.txt') -Value $commit -Encoding ASCII
+Set-Content -Path (Join-Path $Root 'dist\SHA256SUMS-windows.txt') -Value "SHA256  interpres.exe`r`n$Hash" -Encoding ASCII
 
 # Zip
 $Zip = Join-Path $Root 'dist\Interpres-portable-windows.zip'
@@ -174,5 +179,6 @@ Write-Host 'Done.'
 Write-Host "  Folder: $Dist"
 Write-Host "  Zip:    $Zip"
 Write-Host "  SHA256: $Hash"
+Write-Host "  COMMIT: $commit"
 Write-Host ''
 Write-Host 'Double-click Open Interpres.bat in the folder after Live Captions is on.'

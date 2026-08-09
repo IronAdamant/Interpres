@@ -7,8 +7,14 @@
 use super::detect::LiveCaptionsPresence;
 use super::signals::windows_signals;
 use super::CaptureSnapshot;
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::ptr;
+
+/// Hide console windows when a GUI-subsystem app spawns console tools (powershell, etc.).
+/// Without this, each poll flashes a terminal while listening.
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 // Minimal Win32 / UIA bindings.
 
@@ -63,24 +69,38 @@ fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-/// Locate `Get-LiveCaptionsText.ps1` next to the binary, cwd, or common layout.
+/// Built-in copy of `helpers/windows/Get-LiveCaptionsText.ps1` so a lone
+/// `interpres.exe` (e.g. `target/release` or a copied binary) still works.
+const EMBEDDED_UIA_HELPER: &str =
+    include_str!("../../helpers/windows/Get-LiveCaptionsText.ps1");
+
+/// Locate `Get-LiveCaptionsText.ps1` next to the binary, in parent trees
+/// (cargo layout: `target/release` → repo `helpers/`), cwd, or common layout.
 pub fn find_uia_helper() -> Option<PathBuf> {
     let name = "Get-LiveCaptionsText.ps1";
     let rel = Path::new("helpers").join("windows").join(name);
     let mut candidates: Vec<PathBuf> = Vec::new();
 
     if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            candidates.push(dir.join(&rel));
-            candidates.push(dir.join(name));
-            // Portable pack: exe in root, helpers/ beside it
-            candidates.push(dir.join("helpers").join("windows").join(name));
+        let mut dir = exe.parent().map(|p| p.to_path_buf());
+        // Walk up so `target/release/interpres.exe` finds repo helpers/.
+        for _ in 0..8 {
+            let Some(d) = dir else { break };
+            candidates.push(d.join(&rel));
+            candidates.push(d.join(name));
+            candidates.push(d.join("helpers").join("windows").join(name));
+            dir = d.parent().map(|p| p.to_path_buf());
         }
     }
     if let Ok(cwd) = std::env::current_dir() {
-        candidates.push(cwd.join(&rel));
-        candidates.push(cwd.join(name));
-        candidates.push(cwd.join("helpers").join("windows").join(name));
+        let mut dir = Some(cwd);
+        for _ in 0..6 {
+            let Some(d) = dir else { break };
+            candidates.push(d.join(&rel));
+            candidates.push(d.join(name));
+            candidates.push(d.join("helpers").join("windows").join(name));
+            dir = d.parent().map(|p| p.to_path_buf());
+        }
     }
     candidates.push(rel);
     candidates.push(PathBuf::from(name));
@@ -88,6 +108,43 @@ pub fn find_uia_helper() -> Option<PathBuf> {
     for c in candidates {
         if c.is_file() {
             return Some(c);
+        }
+    }
+    None
+}
+
+/// Prefer a real file on disk; otherwise write the embedded helper next to the
+/// exe (or under %TEMP%\Interpres) so listening never depends on packaging alone.
+pub fn resolve_uia_helper() -> Option<PathBuf> {
+    if let Some(p) = find_uia_helper() {
+        return Some(p);
+    }
+    materialize_embedded_helper()
+}
+
+fn materialize_embedded_helper() -> Option<PathBuf> {
+    let name = "Get-LiveCaptionsText.ps1";
+    let mut targets: Vec<PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            targets.push(dir.join(name));
+        }
+    }
+    targets.push(std::env::temp_dir().join("Interpres").join(name));
+
+    for t in targets {
+        if t.is_file() {
+            if let Ok(existing) = std::fs::read_to_string(&t) {
+                if existing.contains("CaptionsTextBlock") {
+                    return Some(t);
+                }
+            }
+        }
+        if let Some(parent) = t.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if std::fs::write(&t, EMBEDDED_UIA_HELPER).is_ok() {
+            return Some(t);
         }
     }
     None
@@ -134,10 +191,10 @@ pub fn poll_text(presence: LiveCaptionsPresence) -> CaptureSnapshot {
         };
     }
 
-    let helper_hint = find_uia_helper()
+    let helper_hint = resolve_uia_helper()
         .map(|p| format!("helper at {}", p.display()))
         .unwrap_or_else(|| {
-            "helpers/windows/Get-LiveCaptionsText.ps1 not found next to interpres.exe".into()
+            "could not locate or create Get-LiveCaptionsText.ps1".into()
         });
 
     CaptureSnapshot {
@@ -146,28 +203,33 @@ pub fn poll_text(presence: LiveCaptionsPresence) -> CaptureSnapshot {
         surface_text: None,
         error: Some(format!(
             "UIA text scrape failed ({helper_hint}). \
-             Keep Get-LiveCaptionsText.ps1 beside the binary, or: interpres run --helper <path>. \
-             Ensure Live Captions is showing text."
+             Keep Live Captions open and showing text (Win+Ctrl+L). \
+             If this persists, run Diagnose or place Get-LiveCaptionsText.ps1 next to interpres.exe."
         )),
     }
 }
 
 fn try_uia_via_powershell() -> Option<String> {
-    let helper = find_uia_helper()?;
+    let helper = resolve_uia_helper()?;
     run_uia_helper(&helper)
 }
 
 fn run_uia_helper(helper: &Path) -> Option<String> {
     // Prefer Windows PowerShell 5.1; fall back to pwsh if present.
+    // CREATE_NO_WINDOW is required: interpres is a GUI PE, so each unflagged
+    // powershell.exe poll would open a visible console (~every poll_ms).
     for shell in ["powershell.exe", "powershell", "pwsh.exe", "pwsh"] {
-        let out = std::process::Command::new(shell)
+        let out = Command::new(shell)
             .args([
                 "-NoProfile",
                 "-ExecutionPolicy",
                 "Bypass",
+                "-WindowStyle",
+                "Hidden",
                 "-File",
             ])
             .arg(helper)
+            .creation_flags(CREATE_NO_WINDOW)
             .output();
         let Ok(out) = out else {
             continue;
@@ -190,7 +252,7 @@ pub fn diagnose_lines() -> Vec<String> {
     lines.push(format!("detail={}", presence.detail));
     lines.push(format!("window_found={}", live_captions_window_found()));
 
-    match find_uia_helper() {
+    match resolve_uia_helper() {
         Some(h) => {
             lines.push(format!("helper={}", h.display()));
             match run_uia_helper(&h) {
@@ -209,10 +271,10 @@ pub fn diagnose_lines() -> Vec<String> {
             }
         }
         None => {
-            lines.push("helper=not_found".into());
+            lines.push("helper=not_found_and_could_not_materialize".into());
             lines.push(
-                "Place helpers/windows/Get-LiveCaptionsText.ps1 next to interpres.exe \
-                 (portable pack does this automatically)."
+                "Place Get-LiveCaptionsText.ps1 next to interpres.exe \
+                 (portable pack includes it; release builds also embed a fallback)."
                     .into(),
             );
         }
@@ -229,6 +291,10 @@ pub fn diagnose_lines() -> Vec<String> {
     lines.push("Windows tip: Live Captions is Win+Ctrl+L (Settings → Accessibility → Captions).".into());
     lines
 }
+
+/// Supported primary scrape path is PowerShell + OS UIAutomation assemblies
+/// (silent via CREATE_NO_WINDOW). In-process COM UIA remains a scaffold only
+/// (PR6 spike deferred) so we never block releases on incomplete FFI.
 
 // Scaffold for a future full in-process UIA COM walk (no PowerShell).
 #[allow(dead_code)]
@@ -248,5 +314,33 @@ fn _ensure_com_symbols_linked() {
         }
         let _ = (S_OK, S_FALSE);
         CoUninitialize();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_no_window_is_standard_flag() {
+        // Win32 CREATE_NO_WINDOW — required so GUI PE does not flash consoles.
+        assert_eq!(CREATE_NO_WINDOW, 0x0800_0000);
+    }
+
+    #[test]
+    fn resolve_uia_helper_finds_or_materializes_script() {
+        let p = resolve_uia_helper().expect("helper path");
+        assert!(p.is_file(), "missing {}", p.display());
+        let body = std::fs::read_to_string(&p).expect("read helper");
+        assert!(
+            body.contains("CaptionsTextBlock"),
+            "helper does not look like UIA script"
+        );
+    }
+
+    #[test]
+    fn embedded_helper_source_is_nonempty() {
+        assert!(EMBEDDED_UIA_HELPER.contains("LiveCaptionsDesktopWindow"));
+        assert!(EMBEDDED_UIA_HELPER.contains("CaptionsTextBlock"));
     }
 }

@@ -299,14 +299,6 @@ fn run_loop(inner: Arc<EngineInner>, tx: Sender<EngineEvent>) {
                 let surface = short_hold.inject_into_surface(raw_surface);
                 let tick =
                     surface_tr.on_surface(&surface, buffer.is_covered(&surface));
-                crate::debuglog::log(&format!(
-                    "surface_chars={} stale={} empty={} skip={} preview={:?}",
-                    surface.chars().count(),
-                    surface_tr.stale_ticks,
-                    surface_tr.empty_ticks,
-                    tick.skip_stale,
-                    surface.chars().take(80).collect::<String>()
-                ));
 
                 if tick.show_lag_tip {
                     let _ = tx.send(EngineEvent::Status(LAG_TIP.into()));
@@ -319,97 +311,36 @@ fn run_loop(inner: Arc<EngineInner>, tx: Sender<EngineEvent>) {
                     let _ = tx.send(EngineEvent::Live(edge));
                 }
 
-                // If AX is stuck on a line we already finalized, skip re-processing
-                // (tracker re-checks every 5th stale tick via should_skip_stale_surface).
+                // Throttle identical stale surface debug spam (AFK / sticky LC).
+                let log_surface = !tick.skip_stale || surface_tr.stale_ticks % 50 == 1;
+                if log_surface {
+                    crate::debuglog::log(&format!(
+                        "surface_chars={} stale={} empty={} skip={} preview={:?}",
+                        surface.chars().count(),
+                        surface_tr.stale_ticks,
+                        surface_tr.empty_ticks,
+                        tick.skip_stale,
+                        surface.chars().take(80).collect::<String>()
+                    ));
+                }
+
                 if tick.process_surface {
-                    match buffer.observe(&surface) {
-                        BufferEmit::Partial(t) => {
-                            // Live UI: current phrase only (not the whole rolling LC blob).
-                            let edge = live_edge_phrase(&t);
-                            let edge = if edge.is_empty() { t } else { edge };
-                            crate::debuglog::log(&format!("PARTIAL {edge}"));
-                            if edge != last_live_edge {
-                                last_live_edge = edge.clone();
-                                let _ = tx.send(EngineEvent::Live(edge));
-                            }
-                        }
-                        BufferEmit::Final(t) => {
-                            crate::debuglog::log(&format!("FINAL {t}"));
-                            let edge = live_edge_phrase(&t);
-                            let edge = if edge.is_empty() {
-                                t.clone()
-                            } else {
-                                edge
-                            };
-                            last_live_edge = edge.clone();
-                            let _ = tx.send(EngineEvent::Live(edge));
-                            let _ = tx.send(EngineEvent::Final(t.clone()));
-                            if let Some(ref mut w) = writer {
-                                let _ = w.write_final(&format_clock(SystemTime::now()), &t);
-                            }
-                            surface_tr.note_final();
-                        }
-                        BufferEmit::Revised(t) => {
-                            crate::debuglog::log(&format!("REVISED {t}"));
-                            let edge = live_edge_phrase(&t);
-                            let edge = if edge.is_empty() {
-                                t.clone()
-                            } else {
-                                edge
-                            };
-                            last_live_edge = edge.clone();
-                            let _ = tx.send(EngineEvent::Live(edge));
-                            let _ = tx.send(EngineEvent::Revised(t.clone()));
-                            if let Some(ref mut w) = writer {
-                                let _ = w.write_final(&format_clock(SystemTime::now()), &t);
-                            }
-                            surface_tr.note_final();
-                        }
-                        BufferEmit::Finals(v) => {
-                            for t in v {
-                                crate::debuglog::log(&format!("FINAL {t}"));
-                                let edge = live_edge_phrase(&t);
-                                let edge = if edge.is_empty() {
-                                    t.clone()
-                                } else {
-                                    edge
-                                };
-                                last_live_edge = edge.clone();
-                                let _ = tx.send(EngineEvent::Live(edge));
-                                let _ = tx.send(EngineEvent::Final(t.clone()));
-                                if let Some(ref mut w) = writer {
-                                    let _ = w.write_final(&format_clock(SystemTime::now()), &t);
-                                }
-                            }
-                            surface_tr.note_final();
-                        }
-                        BufferEmit::None => {}
-                    }
+                    let emit = buffer.observe(&surface);
+                    apply_buffer_emit(emit, &mut writer, &tx, &mut last_live_edge, &mut surface_tr);
                 }
             } else {
                 // Decay holds even without surface; try empty leave-window via held inject.
                 if !_held.is_empty() {
                     let synthetic = short_hold.inject_into_surface("");
                     if !synthetic.trim().is_empty() {
-                        match buffer.observe(&synthetic) {
-                            BufferEmit::Final(t) | BufferEmit::Revised(t) => {
-                                crate::debuglog::log(&format!("FINAL {t}"));
-                                let _ = tx.send(EngineEvent::Final(t.clone()));
-                                if let Some(ref mut w) = writer {
-                                    let _ = w.write_final(&format_clock(SystemTime::now()), &t);
-                                }
-                            }
-                            BufferEmit::Finals(v) => {
-                                for t in v {
-                                    crate::debuglog::log(&format!("FINAL {t}"));
-                                    let _ = tx.send(EngineEvent::Final(t.clone()));
-                                    if let Some(ref mut w) = writer {
-                                        let _ = w.write_final(&format_clock(SystemTime::now()), &t);
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
+                        let emit = buffer.observe(&synthetic);
+                        apply_buffer_emit(
+                            emit,
+                            &mut writer,
+                            &tx,
+                            &mut last_live_edge,
+                            &mut surface_tr,
+                        );
                     }
                 }
                 // No surface (junk filtered out) — dedicated empty_ticks, not shared stale.
@@ -441,34 +372,104 @@ fn flush_buffer(
     writer: &mut Option<TranscriptWriter>,
     tx: &Sender<EngineEvent>,
 ) {
-    match buffer.finish() {
-        BufferEmit::Final(t) => {
-            let _ = tx.send(EngineEvent::Final(t.clone()));
-            if let Some(w) = writer.as_mut() {
-                let _ = w.write_final(&format_clock(SystemTime::now()), &t);
+    let mut last_live = String::new();
+    let mut surface_tr = LiveSurfaceTracker::new();
+    let emit = buffer.finish();
+    // finish Partial becomes Final at end of session.
+    let emit = match emit {
+        BufferEmit::Partial(t) => BufferEmit::Final(t),
+        other => other,
+    };
+    apply_buffer_emit(emit, writer, tx, &mut last_live, &mut surface_tr);
+}
+
+/// Map buffer emissions to UI events + disk (Revised → write_revised).
+fn apply_buffer_emit(
+    emit: BufferEmit,
+    writer: &mut Option<TranscriptWriter>,
+    tx: &Sender<EngineEvent>,
+    last_live_edge: &mut String,
+    surface_tr: &mut LiveSurfaceTracker,
+) {
+    match emit {
+        BufferEmit::None => {}
+        BufferEmit::Partial(t) => {
+            let edge = live_edge_phrase(&t);
+            let edge = if edge.is_empty() { t } else { edge };
+            crate::debuglog::log(&format!("PARTIAL {edge}"));
+            if edge != *last_live_edge {
+                *last_live_edge = edge.clone();
+                let _ = tx.send(EngineEvent::Live(edge));
             }
         }
+        BufferEmit::Final(t) => {
+            emit_final_line(&t, writer, tx, last_live_edge);
+            surface_tr.note_final();
+        }
         BufferEmit::Revised(t) => {
-            let _ = tx.send(EngineEvent::Revised(t.clone()));
-            if let Some(w) = writer.as_mut() {
-                let _ = w.write_final(&format_clock(SystemTime::now()), &t);
-            }
+            emit_revised_line(&t, writer, tx, last_live_edge);
+            surface_tr.note_final();
         }
         BufferEmit::Finals(v) => {
             for t in v {
-                let _ = tx.send(EngineEvent::Final(t.clone()));
-                if let Some(w) = writer.as_mut() {
-                    let _ = w.write_final(&format_clock(SystemTime::now()), &t);
-                }
+                emit_final_line(&t, writer, tx, last_live_edge);
             }
+            surface_tr.note_final();
         }
-        // finish() is leave-window settle; Partial must not be dropped if ever returned.
-        BufferEmit::Partial(t) => {
-            let _ = tx.send(EngineEvent::Final(t.clone()));
-            if let Some(w) = writer.as_mut() {
-                let _ = w.write_final(&format_clock(SystemTime::now()), &t);
+        BufferEmit::Batch { revised, finals } => {
+            for t in revised {
+                emit_revised_line(&t, writer, tx, last_live_edge);
             }
+            for t in finals {
+                emit_final_line(&t, writer, tx, last_live_edge);
+            }
+            surface_tr.note_final();
         }
-        BufferEmit::None => {}
+    }
+}
+
+fn emit_final_line(
+    t: &str,
+    writer: &mut Option<TranscriptWriter>,
+    tx: &Sender<EngineEvent>,
+    last_live_edge: &mut String,
+) {
+    crate::debuglog::log(&format!("FINAL {t}"));
+    let edge = live_edge_phrase(t);
+    let edge = if edge.is_empty() {
+        t.to_string()
+    } else {
+        edge
+    };
+    *last_live_edge = edge.clone();
+    let _ = tx.send(EngineEvent::Live(edge));
+    let _ = tx.send(EngineEvent::Final(t.to_string()));
+    if let Some(w) = writer.as_mut() {
+        if let Err(e) = w.write_final(&format_clock(SystemTime::now()), t) {
+            crate::debuglog::log(&format!("write_final error: {e}"));
+        }
+    }
+}
+
+fn emit_revised_line(
+    t: &str,
+    writer: &mut Option<TranscriptWriter>,
+    tx: &Sender<EngineEvent>,
+    last_live_edge: &mut String,
+) {
+    crate::debuglog::log(&format!("REVISED {t}"));
+    let edge = live_edge_phrase(t);
+    let edge = if edge.is_empty() {
+        t.to_string()
+    } else {
+        edge
+    };
+    *last_live_edge = edge.clone();
+    let _ = tx.send(EngineEvent::Live(edge));
+    let _ = tx.send(EngineEvent::Revised(t.to_string()));
+    if let Some(w) = writer.as_mut() {
+        if let Err(e) = w.write_revised(&format_clock(SystemTime::now()), t) {
+            crate::debuglog::log(&format!("write_revised error: {e}"));
+        }
     }
 }

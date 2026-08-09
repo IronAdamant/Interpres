@@ -2,7 +2,7 @@
 //!
 //! Mirrors the macOS AppKit control set; talks to the same CaptureEngine core.
 
-use crate::buffer::same_or_refinement;
+
 use crate::config::Config;
 use crate::engine::{CaptureEngine, EngineEvent};
 use crate::probe;
@@ -171,7 +171,6 @@ extern "system" {
     fn PostQuitMessage(code: c_int);
     fn DestroyWindow(hwnd: Hwnd) -> c_int;
     fn SetWindowTextW(hwnd: Hwnd, text: *const u16) -> c_int;
-    fn GetWindowTextW(hwnd: Hwnd, buf: *mut u16, max: c_int) -> c_int;
     fn GetWindowTextLengthW(hwnd: Hwnd) -> c_int;
     fn EnableWindow(hwnd: Hwnd, enable: c_int) -> c_int;
     fn SetTimer(hwnd: Hwnd, id: usize, elapse: u32, timer_fn: *const c_void) -> usize;
@@ -354,77 +353,6 @@ fn set_text(hwnd: Hwnd, s: &str) {
     }
 }
 
-fn get_text(hwnd: Hwnd) -> String {
-    if hwnd.is_null() {
-        return String::new();
-    }
-    unsafe {
-        let len = GetWindowTextLengthW(hwnd);
-        if len <= 0 {
-            return String::new();
-        }
-        let mut buf = vec![0u16; (len as usize) + 1];
-        GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as c_int);
-        from_wide(&buf)
-    }
-}
-
-fn append_line(hwnd: Hwnd, line: &str) {
-    if hwnd.is_null() {
-        return;
-    }
-    let mut cur = get_text(hwnd);
-    if !cur.is_empty() && !cur.ends_with('\n') {
-        cur.push('\r');
-        cur.push('\n');
-    }
-    cur.push_str(line);
-    cur.push('\r');
-    cur.push('\n');
-    set_text(hwnd, &cur);
-    unsafe {
-        let len = GetWindowTextLengthW(hwnd) as Wparam;
-        SendMessageW(hwnd, EM_SETSEL, len, len as Lparam);
-        SendMessageW(hwnd, EM_SCROLLCARET, 0, 0);
-    }
-}
-
-/// Replace the last non-empty line in the session history box (draft → polish).
-fn replace_last_history_line(hwnd: Hwnd, line: &str) {
-    if hwnd.is_null() {
-        return;
-    }
-    let cur = get_text(hwnd);
-    if cur.trim().is_empty() {
-        append_line(hwnd, line);
-        return;
-    }
-    let mut lines: Vec<&str> = cur.lines().collect();
-    while lines.last().is_some_and(|l| l.trim().is_empty()) {
-        lines.pop();
-    }
-    if lines.is_empty() {
-        append_line(hwnd, line);
-        return;
-    }
-    lines.pop();
-    let mut out = String::new();
-    for l in lines {
-        out.push_str(l);
-        out.push('\r');
-        out.push('\n');
-    }
-    out.push_str(line);
-    out.push('\r');
-    out.push('\n');
-    set_text(hwnd, &out);
-    unsafe {
-        let len = GetWindowTextLengthW(hwnd) as Wparam;
-        SendMessageW(hwnd, EM_SETSEL, len, len as Lparam);
-        SendMessageW(hwnd, EM_SCROLLCARET, 0, 0);
-    }
-}
-
 struct GuiState {
     engine: CaptureEngine,
     remember_on: bool,
@@ -456,7 +384,8 @@ struct UiHandles {
 
 struct AppCtx {
     state: Arc<Mutex<GuiState>>,
-    last_hist: Arc<Mutex<String>>,
+    /// Session history lines (family-aware apply on Final/Revised).
+    last_hist: Arc<Mutex<Vec<String>>>,
     rx: Mutex<Receiver<EngineEvent>>,
     ui: Mutex<UiHandles>,
     font_ui: Hfont,
@@ -504,34 +433,25 @@ fn main_hwnd() -> Hwnd {
     h
 }
 
-fn apply_event(ev: EngineEvent, last_hist: &Mutex<String>, ui: &UiHandles) {
+fn apply_event(ev: EngineEvent, hist_state: &Mutex<Vec<String>>, ui: &UiHandles) {
     match ev {
         EngineEvent::Status(s) => set_text(ui.status, &s),
         EngineEvent::Live(s) => set_text(ui.live, &s),
         EngineEvent::Final(s) => {
             set_text(ui.live, &s);
-            let mut skip = false;
-            if let Ok(mut last) = last_hist.lock() {
-                if !last.is_empty() && same_or_refinement(&last, &s) {
-                    if s.len() >= last.len() {
-                        *last = s.clone();
-                        replace_last_history_line(ui.history, &s);
-                    }
-                    skip = true;
-                } else {
-                    *last = s.clone();
-                }
-            }
-            if !skip {
-                append_line(ui.history, &s);
+            if let Ok(mut hist) = hist_state.lock() {
+                let (new_h, _) = crate::history_ui::history_apply_final(&hist, &s);
+                *hist = new_h;
+                set_history_lines(ui.history, &hist);
             }
         }
         EngineEvent::Revised(s) => {
             set_text(ui.live, &s);
-            if let Ok(mut last) = last_hist.lock() {
-                *last = s.clone();
+            if let Ok(mut hist) = hist_state.lock() {
+                let (new_h, _) = crate::history_ui::history_apply_revised(&hist, &s);
+                *hist = new_h;
+                set_history_lines(ui.history, &hist);
             }
-            replace_last_history_line(ui.history, &s);
         }
         EngineEvent::Error(s) => set_text(ui.status, &format!("! {s}")),
         EngineEvent::SessionFile(Some(p)) => {
@@ -551,7 +471,28 @@ fn apply_event(ev: EngineEvent, last_hist: &Mutex<String>, ui: &UiHandles) {
                 EnableWindow(ui.start, if on { 0 } else { 1 });
                 EnableWindow(ui.stop, if on { 1 } else { 0 });
             }
+            if on {
+                if let Ok(mut hist) = hist_state.lock() {
+                    hist.clear();
+                }
+                set_text(ui.history, "");
+                set_text(ui.live, "");
+            }
         }
+    }
+}
+
+/// Replace the entire Session history EDIT contents from a line list.
+fn set_history_lines(hwnd: Hwnd, lines: &[String]) {
+    let text = crate::history_ui::history_to_edit_text(lines);
+    set_text(hwnd, &text);
+    if hwnd.is_null() {
+        return;
+    }
+    unsafe {
+        let len = GetWindowTextLengthW(hwnd) as Wparam;
+        SendMessageW(hwnd, EM_SETSEL, len, len as Lparam);
+        SendMessageW(hwnd, EM_SCROLLCARET, 0, 0);
     }
 }
 
@@ -1237,7 +1178,7 @@ pub fn run_windows_gui() -> i32 {
         remember_on: remember0,
         debug_on: debug0,
     }));
-    let last_hist = Arc::new(Mutex::new(String::new()));
+    let last_hist = Arc::new(Mutex::new(Vec::<String>::new()));
 
     let instance = unsafe { GetModuleHandleW(ptr::null()) };
     let class_name = to_wide("InterpresMainWnd");

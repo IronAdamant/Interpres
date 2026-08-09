@@ -783,29 +783,7 @@ fn run_in_process(cfg: &Config) -> i32 {
                         reason: "live_captions_stopped".into(),
                     }
                 );
-                match buffer.finish() {
-                    BufferEmit::Final(t) | BufferEmit::Partial(t) => {
-                        println!("FINAL {t}");
-                        if let Some(ref mut w) = writer {
-                            let _ = w.write_final(&format_clock(SystemTime::now()), &t);
-                        }
-                    }
-                    BufferEmit::Revised(t) => {
-                        println!("REVISED {t}");
-                        if let Some(ref mut w) = writer {
-                            let _ = w.write_final(&format_clock(SystemTime::now()), &t);
-                        }
-                    }
-                    BufferEmit::Finals(v) => {
-                        for t in v {
-                            println!("FINAL {t}");
-                            if let Some(ref mut w) = writer {
-                                let _ = w.write_final(&format_clock(SystemTime::now()), &t);
-                            }
-                        }
-                    }
-                    BufferEmit::None => {}
-                }
+                cli_apply_emit(buffer.finish(), &mut writer);
                 if let Some(ref mut w) = writer {
                     let _ = w.end_session("lc_stopped");
                     println!("Saved: {}", w.txt_path().display());
@@ -840,32 +818,7 @@ fn run_in_process(cfg: &Config) -> i32 {
                 }
             }
             if let Some(ref surface) = snap.surface_text {
-                match buffer.observe(surface) {
-                    BufferEmit::Partial(t) => {
-                        println!("PARTIAL {t}");
-                    }
-                    BufferEmit::Final(t) => {
-                        println!("FINAL {t}");
-                        if let Some(ref mut w) = writer {
-                            let _ = w.write_final(&format_clock(SystemTime::now()), &t);
-                        }
-                    }
-                    BufferEmit::Revised(t) => {
-                        println!("REVISED {t}");
-                        if let Some(ref mut w) = writer {
-                            let _ = w.write_final(&format_clock(SystemTime::now()), &t);
-                        }
-                    }
-                    BufferEmit::Finals(v) => {
-                        for t in v {
-                            println!("FINAL {t}");
-                            if let Some(ref mut w) = writer {
-                                let _ = w.write_final(&format_clock(SystemTime::now()), &t);
-                            }
-                        }
-                    }
-                    BufferEmit::None => {}
-                }
+                cli_apply_emit(buffer.observe(surface), &mut writer);
             }
         }
 
@@ -877,6 +830,47 @@ fn run_in_process(cfg: &Config) -> i32 {
         println!("Saved: {}", w.txt_path().display());
     }
     0
+}
+
+fn cli_apply_emit(emit: BufferEmit, writer: &mut Option<TranscriptWriter>) {
+    match emit {
+        BufferEmit::None => {}
+        BufferEmit::Partial(t) => println!("PARTIAL {t}"),
+        BufferEmit::Final(t) => {
+            println!("FINAL {t}");
+            if let Some(w) = writer.as_mut() {
+                let _ = w.write_final(&format_clock(SystemTime::now()), &t);
+            }
+        }
+        BufferEmit::Revised(t) => {
+            println!("REVISED {t}");
+            if let Some(w) = writer.as_mut() {
+                let _ = w.write_revised(&format_clock(SystemTime::now()), &t);
+            }
+        }
+        BufferEmit::Finals(v) => {
+            for t in v {
+                println!("FINAL {t}");
+                if let Some(w) = writer.as_mut() {
+                    let _ = w.write_final(&format_clock(SystemTime::now()), &t);
+                }
+            }
+        }
+        BufferEmit::Batch { revised, finals } => {
+            for t in revised {
+                println!("REVISED {t}");
+                if let Some(w) = writer.as_mut() {
+                    let _ = w.write_revised(&format_clock(SystemTime::now()), &t);
+                }
+            }
+            for t in finals {
+                println!("FINAL {t}");
+                if let Some(w) = writer.as_mut() {
+                    let _ = w.write_final(&format_clock(SystemTime::now()), &t);
+                }
+            }
+        }
+    }
 }
 
 fn handle_event(ev: &CaptionEvent, writer: &mut Option<TranscriptWriter>) {
