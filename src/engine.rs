@@ -2,8 +2,11 @@
 
 use crate::buffer::{live_edge_phrase, BufferEmit, CaptionBuffer, ShortLineHold};
 use crate::config::Config;
+use crate::health::{Health, HealthMonitor};
 use crate::lifecycle::{Lifecycle, LifecycleAction};
 use crate::platform;
+use crate::plugin_host::PluginHost;
+use crate::protocol::{CaptionEvent, LcState};
 use crate::transcript::{format_clock, TranscriptWriter};
 use crate::ui_labels::{
     session_open_status, CaptureErrorHysteresis, LiveSurfaceTracker, LAG_TIP,
@@ -13,7 +16,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
+
+/// Live Captions back within this window → keep writing the same transcript file
+/// (a meeting should not split because LC restarted or blipped).
+pub const RESUME_SAME_FILE_WITHIN: Duration = Duration::from_secs(15 * 60);
+/// After Stop, keep reading this long so the sentence being spoken still lands.
+const STOP_DRAIN_MAX: Duration = Duration::from_millis(2500);
+/// …but finish early once the caption text has not changed for this long.
+const STOP_DRAIN_SETTLED: Duration = Duration::from_millis(900);
+/// Wait this long before restarting an external engine that failed or exited.
+const ENGINE_RESTART_BACKOFF: Duration = Duration::from_secs(5);
+/// Log polls slower than this (field failure: polls stretched to ~27 s unnoticed).
+const SLOW_POLL_LOG: Duration = Duration::from_millis(2000);
 
 /// Events the UI (or CLI) can show.
 #[derive(Clone, Debug)]
@@ -26,6 +41,8 @@ pub enum EngineEvent {
     Error(String),
     SessionFile(Option<PathBuf>),
     Listening(bool),
+    /// Capture health changed (banner state). See `crate::health`.
+    Health(Health),
 }
 
 struct EngineInner {
@@ -121,18 +138,34 @@ impl CaptureEngine {
         }
     }
 
+    /// Stop and wait for the capture thread (including the short end-of-session drain).
     pub fn stop(&self) {
         self.inner.stop.store(true, Ordering::SeqCst);
-        if let Ok(mut g) = self.handle.lock() {
-            if let Some(h) = g.take() {
-                let _ = h.join();
-            }
+        let joined = self
+            .handle
+            .lock()
+            .ok()
+            .and_then(|mut g| g.take())
+            .map(|h| h.join())
+            .is_some();
+        if !joined {
+            // No thread: still tell the UI it is idle (thread sends these itself on exit).
+            send_stopped(&self.tx);
         }
-        let _ = self.tx.send(EngineEvent::Listening(false));
-        let _ = self.tx.send(EngineEvent::Status("Stopped.".into()));
-        let _ = self.tx.send(EngineEvent::Live(String::new()));
-        let _ = self.tx.send(EngineEvent::SessionFile(None));
     }
+
+    /// Ask the capture thread to finish without blocking the caller (UI thread).
+    /// The thread drains the last caption, saves, then sends `Listening(false)`.
+    pub fn request_stop(&self) {
+        self.inner.stop.store(true, Ordering::SeqCst);
+    }
+}
+
+fn send_stopped(tx: &Sender<EngineEvent>) {
+    let _ = tx.send(EngineEvent::Listening(false));
+    let _ = tx.send(EngineEvent::Status("Stopped.".into()));
+    let _ = tx.send(EngineEvent::Live(String::new()));
+    let _ = tx.send(EngineEvent::SessionFile(None));
 }
 
 fn source_label() -> &'static str {
@@ -151,6 +184,11 @@ fn source_label() -> &'static str {
 }
 
 fn run_loop(inner: Arc<EngineInner>, tx: Sender<EngineEvent>) {
+    let cfg0 = Config::load();
+    if cfg0.uses_external_engine() {
+        run_external_engine(&inner, &tx, &cfg0);
+        return;
+    }
     #[cfg(target_os = "macos")]
     {
         if !crate::platform::macos::is_accessibility_trusted() {
@@ -176,12 +214,42 @@ fn run_loop(inner: Arc<EngineInner>, tx: Sender<EngineEvent>) {
     let mut surface_tr = LiveSurfaceTracker::new();
     let mut short_hold = ShortLineHold::new();
     let mut last_live_edge = String::new();
+    let mut health = HealthMonitor::new();
+    // Hard errors repeat every poll while showing; log each distinct one once.
+    let mut last_logged_error: Option<String> = None;
+    // When LC went away mid-session (writer kept open for RESUME_SAME_FILE_WITHIN).
+    let mut lc_gone_at: Option<Instant> = None;
     // Floor 100ms so config can go lower; default is 150 (short-line fidelity).
     let poll = cfg.poll_ms.max(100);
+    let loop_start = Instant::now();
+    let mut last_tick = Instant::now();
 
     while !inner.stop.load(Ordering::SeqCst) {
+        let poll_started = Instant::now();
         let snap = platform::poll_capture();
-        let action = life.tick(snap.process_running, poll);
+        let poll_took = poll_started.elapsed();
+        if poll_took > SLOW_POLL_LOG {
+            crate::debuglog::log(&format!("slow poll: {}ms", poll_took.as_millis()));
+        }
+        // Real elapsed time, not the nominal poll interval: slow polls must not
+        // stretch the LC-off debounce into minutes.
+        let elapsed_ms = last_tick.elapsed().as_millis() as u64;
+        last_tick = Instant::now();
+        let action = life.tick(snap.process_running, elapsed_ms);
+
+        let has_text = snap
+            .surface_text
+            .as_ref()
+            .is_some_and(|s| !s.trim().is_empty());
+        let now_ms = loop_start.elapsed().as_millis() as u64;
+        if let Some(h) = health.on_poll(now_ms, snap.process_running, has_text, snap.error.as_deref()) {
+            crate::debuglog::log(&format!(
+                "health {} (error={:?})",
+                h.as_str(),
+                snap.error.as_deref().unwrap_or("")
+            ));
+            let _ = tx.send(EngineEvent::Health(h));
+        }
 
         match action {
             LifecycleAction::Open => {
@@ -190,6 +258,33 @@ fn run_loop(inner: Arc<EngineInner>, tx: Sender<EngineEvent>) {
                     snap.detail
                 )));
                 // Do not pin scrape errors on Open — hysteresis handles sticky UI errors.
+                if !session_open {
+                    // LC came back: continue the same file if it was a short gap.
+                    if let Some(gone) = lc_gone_at.take() {
+                        if writer.is_some() && gone.elapsed() <= RESUME_SAME_FILE_WITHIN {
+                            if let Some(ref mut w) = writer {
+                                let _ = w.write_note(
+                                    &format_clock(SystemTime::now()),
+                                    "Live Captions back on",
+                                );
+                            }
+                            crate::debuglog::log("Live Captions back — continuing same session file");
+                            session_open = true;
+                            buffer.reset();
+                            surface_tr.reset();
+                            short_hold.clear();
+                            last_live_edge.clear();
+                            if let Some(ref wr) = writer {
+                                let _ = tx.send(EngineEvent::SessionFile(Some(
+                                    wr.txt_path().to_path_buf(),
+                                )));
+                            }
+                        } else if let Some(ref mut w) = writer {
+                            let _ = w.end_session("lc_stopped");
+                            writer = None;
+                        }
+                    }
+                }
                 if !session_open {
                     let folder = inner
                         .folder
@@ -251,16 +346,19 @@ fn run_loop(inner: Arc<EngineInner>, tx: Sender<EngineEvent>) {
                     "Live Captions stopped — waiting…".into(),
                 ));
                 flush_buffer(&mut buffer, &mut writer, &tx);
+                // Keep the file open: if LC returns soon, the meeting stays in one file.
                 if let Some(ref mut w) = writer {
-                    let _ = w.end_session("lc_stopped");
+                    let _ = w.write_note(
+                        &format_clock(SystemTime::now()),
+                        "Live Captions turned off — nothing captured until it is back on",
+                    );
                 }
-                writer = None;
+                crate::debuglog::log("Live Captions gone — session paused");
+                lc_gone_at = Some(Instant::now());
                 session_open = false;
                 err_hyst = CaptureErrorHysteresis::new();
                 short_hold.clear();
                 last_live_edge.clear();
-                crate::debuglog::set_session_stem(None);
-                let _ = tx.send(EngineEvent::SessionFile(None));
                 let _ = tx.send(EngineEvent::Live(String::new()));
             }
             LifecycleAction::None => {}
@@ -270,6 +368,7 @@ fn run_loop(inner: Arc<EngineInner>, tx: Sender<EngineEvent>) {
             let surface_ok = snap.surface_text.as_ref().is_some_and(|s| !s.trim().is_empty());
             let err_tick = err_hyst.on_poll(surface_ok, snap.error.as_deref());
             if err_tick.clear_error {
+                last_logged_error = None;
                 // Restore non-error status after a good surface (do not leave UIA error pinned).
                 if let Some(ref wr) = writer {
                     let _ = tx.send(EngineEvent::Status(session_open_status(
@@ -283,6 +382,10 @@ fn run_loop(inner: Arc<EngineInner>, tx: Sender<EngineEvent>) {
                 }
             } else if err_tick.show_hard_error {
                 if let Some(ref msg) = err_tick.message {
+                    if last_logged_error.as_deref() != Some(msg.as_str()) {
+                        crate::debuglog::log(&format!("capture error: {msg}"));
+                        last_logged_error = Some(msg.clone());
+                    }
                     let _ = tx.send(EngineEvent::Error(msg.clone()));
                 }
             }
@@ -361,10 +464,227 @@ fn run_loop(inner: Arc<EngineInner>, tx: Sender<EngineEvent>) {
         thread::sleep(Duration::from_millis(poll));
     }
 
+    if session_open {
+        drain_after_stop(&mut buffer, &mut writer, &tx);
+    }
     flush_buffer(&mut buffer, &mut writer, &tx);
     if let Some(ref mut w) = writer {
         let _ = w.end_session("user");
     }
+    crate::debuglog::set_session_stem(None);
+    platform::shutdown_capture();
+    send_stopped(&tx);
+}
+
+/// Report health changes once (UI banner + debug log).
+struct HealthReporter<'a> {
+    tx: &'a Sender<EngineEvent>,
+    current: Option<Health>,
+}
+
+impl HealthReporter<'_> {
+    fn set(&mut self, h: Health) {
+        if self.current != Some(h) {
+            self.current = Some(h);
+            crate::debuglog::log(&format!("health {}", h.as_str()));
+            let _ = self.tx.send(EngineEvent::Health(h));
+        }
+    }
+}
+
+/// Bring-your-own speech engine (docs/ENGINES.md): run `helper_path helper_args`, read
+/// protocol lines from its stdout, save FINAL lines. The engine captures audio itself.
+fn run_external_engine(inner: &EngineInner, tx: &Sender<EngineEvent>, cfg: &Config) {
+    let name = cfg.engine_name();
+    let Some(program) = cfg.helper_path.clone() else {
+        return;
+    };
+    let args = crate::config::split_args(&cfg.helper_args);
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let folder = inner
+        .folder
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_else(|_| cfg.transcript_folder.clone());
+    let remember = inner.remember.load(Ordering::SeqCst);
+
+    let mut writer = match TranscriptWriter::begin_session(
+        &folder,
+        remember,
+        cfg.write_jsonl,
+        &format!("External engine ({name})"),
+        SystemTime::now(),
+    ) {
+        Ok(w) => w,
+        Err(e) => {
+            let _ = tx.send(EngineEvent::Error(format!("Could not create session file: {e}")));
+            None
+        }
+    };
+    if let Some(ref wr) = writer {
+        crate::debuglog::set_session_stem(Some(wr.stem().to_string()));
+        crate::debuglog::log(&format!("session file {}", wr.txt_path().display()));
+        let _ = tx.send(EngineEvent::SessionFile(Some(wr.txt_path().to_path_buf())));
+    }
+    let _ = tx.send(EngineEvent::Status(format!("Captions from external engine: {name}")));
+
+    let mut health = HealthReporter { tx, current: None };
+    let mut host: Option<PluginHost> = None;
+    let mut next_start = Instant::now();
+    let mut last_live = String::new();
+
+    while !inner.stop.load(Ordering::SeqCst) {
+        if host.is_none() && Instant::now() >= next_start {
+            match PluginHost::start(&program, &arg_refs) {
+                Ok(h) => {
+                    crate::debuglog::log(&format!(
+                        "engine started: {} {}",
+                        program.display(),
+                        cfg.helper_args
+                    ));
+                    host = Some(h);
+                }
+                Err(e) => {
+                    crate::debuglog::log(&format!("engine failed to start: {e}"));
+                    let _ = tx.send(EngineEvent::Error(format!(
+                        "Could not start {name} ({}): {e}",
+                        program.display()
+                    )));
+                    health.set(Health::EngineStopped);
+                    next_start = Instant::now() + ENGINE_RESTART_BACKOFF;
+                }
+            }
+        }
+
+        if let Some(h) = host.as_mut() {
+            while let Some(ev) = h.try_recv() {
+                handle_engine_event(ev, &mut writer, tx, &mut health, &mut last_live);
+            }
+            if let Some(status) = h.exit_status() {
+                for ev in h.shutdown_collect() {
+                    handle_engine_event(ev, &mut writer, tx, &mut health, &mut last_live);
+                }
+                crate::debuglog::log(&format!("engine exited ({status}) — restarting"));
+                if let Some(ref mut w) = writer {
+                    let _ = w.write_note(
+                        &format_clock(SystemTime::now()),
+                        &format!("Caption engine stopped ({status}) — restarting"),
+                    );
+                }
+                let _ = tx.send(EngineEvent::Error(format!(
+                    "{name} stopped ({status}). Restarting in {} s…",
+                    ENGINE_RESTART_BACKOFF.as_secs()
+                )));
+                health.set(Health::EngineStopped);
+                host = None;
+                next_start = Instant::now() + ENGINE_RESTART_BACKOFF;
+            }
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    if let Some(mut h) = host.take() {
+        let _ = tx.send(EngineEvent::Status("Saving the last words…".into()));
+        for ev in h.shutdown_collect() {
+            handle_engine_event(ev, &mut writer, tx, &mut health, &mut last_live);
+        }
+        crate::debuglog::log("engine stopped by user");
+    }
+    if let Some(ref mut w) = writer {
+        let _ = w.end_session("user");
+    }
+    crate::debuglog::set_session_stem(None);
+    send_stopped(tx);
+}
+
+fn handle_engine_event(
+    ev: CaptionEvent,
+    writer: &mut Option<TranscriptWriter>,
+    tx: &Sender<EngineEvent>,
+    health: &mut HealthReporter,
+    last_live: &mut String,
+) {
+    match ev {
+        CaptionEvent::Ready => {
+            crate::debuglog::log("engine READY");
+            health.set(Health::WaitingForSpeech);
+        }
+        CaptionEvent::Partial { text } => {
+            let text = text.trim().to_string();
+            if !text.is_empty() && text != *last_live {
+                health.set(Health::Recording);
+                *last_live = text.clone();
+                let _ = tx.send(EngineEvent::Live(text));
+            }
+        }
+        CaptionEvent::Final { text } => {
+            let text = text.trim();
+            if text.is_empty() {
+                return;
+            }
+            health.set(Health::Recording);
+            crate::debuglog::log(&format!("FINAL {text}"));
+            last_live.clear();
+            let _ = tx.send(EngineEvent::Live(String::new()));
+            let _ = tx.send(EngineEvent::Final(text.to_string()));
+            if let Some(w) = writer.as_mut() {
+                if let Err(e) = w.append_final(&format_clock(SystemTime::now()), text) {
+                    crate::debuglog::log(&format!("write_final error: {e}"));
+                }
+            }
+        }
+        CaptionEvent::Status { lc, reason } => {
+            crate::debuglog::log(&format!("engine STATUS {} {reason}", lc.as_str()));
+            match lc {
+                LcState::Stopped | LcState::Degraded => health.set(Health::EngineStopped),
+                LcState::Running if health.current.is_none() => {
+                    health.set(Health::WaitingForSpeech)
+                }
+                _ => {}
+            }
+        }
+        CaptionEvent::Error { message } => {
+            crate::debuglog::log(&format!("engine ERROR {message}"));
+            let _ = tx.send(EngineEvent::Error(message));
+        }
+        CaptionEvent::Log { level, message } => {
+            crate::debuglog::log(&format!("engine {level}: {message}"));
+        }
+        CaptionEvent::Shutdown | CaptionEvent::Unknown(_) => {}
+    }
+}
+
+/// Keep reading briefly after Stop so a sentence still being captioned is saved whole.
+fn drain_after_stop(
+    buffer: &mut CaptionBuffer,
+    writer: &mut Option<TranscriptWriter>,
+    tx: &Sender<EngineEvent>,
+) {
+    let _ = tx.send(EngineEvent::Status("Saving the last words…".into()));
+    let started = Instant::now();
+    let mut last_change = Instant::now();
+    let mut last_surface = String::new();
+    let mut live = String::new();
+    let mut tracker = LiveSurfaceTracker::new();
+    while started.elapsed() < STOP_DRAIN_MAX {
+        let snap = platform::poll_capture();
+        let Some(surface) = snap.surface_text.filter(|s| !s.trim().is_empty()) else {
+            break;
+        };
+        if surface != last_surface {
+            last_change = Instant::now();
+            last_surface = surface.clone();
+            let emit = buffer.observe(&surface);
+            apply_buffer_emit(emit, writer, tx, &mut live, &mut tracker);
+        } else if last_change.elapsed() >= STOP_DRAIN_SETTLED {
+            break;
+        }
+        thread::sleep(Duration::from_millis(150));
+    }
+    crate::debuglog::log(&format!(
+        "stop drain {}ms",
+        started.elapsed().as_millis()
+    ));
 }
 
 fn flush_buffer(

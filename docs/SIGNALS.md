@@ -11,7 +11,7 @@ Update these when an OS update breaks capture. Values live in `src/platform/sign
 | Text AutomationId | `CaptionsTextBlock` (fallback `CaptionsScrollViewer`) |
 | Ignore | `ReadyToCaptionTextBlock` |
 
-Helper: `helpers/windows/Get-LiveCaptionsText.ps1`
+Reader: in-process UI Automation (`src/platform/windows_uia.rs`), IUIAutomation2 timeouts 1.5 s connect / 2.5 s per call.
 
 ## macOS
 

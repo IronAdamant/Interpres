@@ -52,10 +52,70 @@ fn civil_from_unix_local(secs: i64) -> (i32, u32, u32, u32, u32, u32) {
             );
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        if let Some(local) = windows_local(secs) {
+            return local;
+        }
+        civil_from_unix_utc(secs)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         civil_from_unix_utc(secs)
     }
+}
+
+#[cfg(windows)]
+#[repr(C)]
+#[derive(Default)]
+struct WinSystemTime {
+    year: u16,
+    month: u16,
+    day_of_week: u16,
+    day: u16,
+    hour: u16,
+    minute: u16,
+    second: u16,
+    milliseconds: u16,
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn FileTimeToSystemTime(ft: *const u64, st: *mut WinSystemTime) -> i32;
+    fn SystemTimeToTzSpecificLocalTime(
+        tz: *const std::ffi::c_void,
+        utc: *const WinSystemTime,
+        local: *mut WinSystemTime,
+    ) -> i32;
+}
+
+/// Unix seconds → local civil time via the Windows time zone (handles DST).
+#[cfg(windows)]
+fn windows_local(secs: i64) -> Option<(i32, u32, u32, u32, u32, u32)> {
+    // FILETIME: 100 ns ticks since 1601-01-01.
+    const UNIX_TO_FILETIME: u64 = 116_444_736_000_000_000;
+    let ft = (secs.max(0) as u64)
+        .checked_mul(10_000_000)?
+        .checked_add(UNIX_TO_FILETIME)?;
+    let mut utc = WinSystemTime::default();
+    let mut local = WinSystemTime::default();
+    unsafe {
+        if FileTimeToSystemTime(&ft, &mut utc) == 0 {
+            return None;
+        }
+        if SystemTimeToTzSpecificLocalTime(std::ptr::null(), &utc, &mut local) == 0 {
+            return None;
+        }
+    }
+    Some((
+        local.year as i32,
+        local.month as u32,
+        local.day as u32,
+        local.hour as u32,
+        local.minute as u32,
+        local.second as u32,
+    ))
 }
 
 fn civil_from_unix_utc(mut secs: i64) -> (i32, u32, u32, u32, u32, u32) {
@@ -132,6 +192,22 @@ mod tests {
             }
             assert!(c.is_ascii_digit(), "bad char at {i} in {s}");
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_stamp_uses_local_time_zone() {
+        let t = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let secs = 1_700_000_000i64;
+        let local = windows_local(secs).expect("local time");
+        let (y, mo, d, h, mi, s) = local;
+        assert_eq!(
+            format_session_stamp(t),
+            format!("{y:04}-{mo:02}-{d:02}_{h:02}-{mi:02}-{s:02}")
+        );
+        // Minutes/seconds agree with UTC for whole-hour/half-hour offsets.
+        let utc = civil_from_unix_utc(secs);
+        assert_eq!(s, utc.5);
     }
 
     #[test]

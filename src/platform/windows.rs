@@ -1,247 +1,274 @@
-//! Windows Live Captions text capture via UI Automation (hand-written COM FFI).
+//! Windows Live Captions text capture via in-process UI Automation (no PowerShell).
 //!
-//! Compiles only on Windows. Uses system OLE/COM + UIAutomationCore.
-//! Primary text path today: PowerShell + UIAutomationClient (OS assemblies),
-//! with FindWindow process/window checks in-process.
+//! A background reader thread owns the UIA client (`windows_uia`) and samples the
+//! Live Captions window every `READER_INTERVAL_MS`. `poll_text` returns the latest
+//! read. A watchdog replaces the thread if reads stop arriving; per-call UIA timeouts
+//! normally keep that from ever being needed.
 
 use super::detect::LiveCaptionsPresence;
 use super::signals::windows_signals;
+use super::windows_uia::{CaptionRead, CaptionsUia, CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
 use super::CaptureSnapshot;
 use std::os::windows::process::CommandExt;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
-/// Hide console windows when a GUI-subsystem app spawns console tools (powershell, etc.).
-/// Without this, each poll flashes a terminal while listening.
+/// Hide console windows when a GUI-subsystem app spawns console tools (taskkill, etc.).
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-// Minimal Win32 / UIA bindings.
+/// How often the reader thread samples Live Captions.
+const READER_INTERVAL_MS: u64 = 200;
+/// No completed read for this long → reader is wedged; replace the thread.
+const READER_HUNG_AFTER: Duration = Duration::from_secs(5);
+/// One-shot callers (probe / diagnose / first engine poll) wait this long for a first read.
+const FIRST_READ_WAIT: Duration = Duration::from_secs(4);
+/// Do not respawn a reader that keeps dying more often than this.
+const RESPAWN_BACKOFF: Duration = Duration::from_secs(3);
 
-#[link(name = "ole32")]
-extern "system" {
-    fn CoInitializeEx(pvreserved: *mut core::ffi::c_void, dwcoinit: u32) -> i32;
-    fn CoCreateInstance(
-        rclsid: *const Guid,
-        punkouter: *mut core::ffi::c_void,
-        dwclscontext: u32,
-        riid: *const Guid,
-        ppv: *mut *mut core::ffi::c_void,
-    ) -> i32;
-    fn CoUninitialize();
+#[derive(Default)]
+struct ReaderShared {
+    latest: Option<CaptionRead>,
+    at: Option<Instant>,
 }
 
-#[link(name = "user32")]
-extern "system" {
-    fn FindWindowW(lpclassname: *const u16, lpwindowname: *const u16) -> *mut core::ffi::c_void;
+struct Reader {
+    shared: Arc<Mutex<ReaderShared>>,
+    stop: Arc<AtomicBool>,
+    handle: JoinHandle<()>,
+    started: Instant,
 }
 
-#[repr(C)]
-struct Guid {
-    data1: u32,
-    data2: u16,
-    data3: u16,
-    data4: [u8; 8],
-}
-
-// CLSID_CUIAutomation = {ff48dba4-60ef-4201-aa87-54103eef594e}
-const CLSID_CUI_AUTOMATION: Guid = Guid {
-    data1: 0xff48dba4,
-    data2: 0x60ef,
-    data3: 0x4201,
-    data4: [0xaa, 0x87, 0x54, 0x10, 0x3e, 0xef, 0x59, 0x4e],
-};
-
-// IID_IUIAutomation = {30cbe57d-d9d0-452a-ab13-7ac5ac4825ee}
-const IID_IUI_AUTOMATION: Guid = Guid {
-    data1: 0x30cbe57d,
-    data2: 0xd9d0,
-    data3: 0x452a,
-    data4: [0xab, 0x13, 0x7a, 0xc5, 0xac, 0x48, 0x25, 0xee],
-};
-
-const COINIT_APARTMENTTHREADED: u32 = 0x2;
-const CLSCTX_INPROC_SERVER: u32 = 0x1;
-const S_OK: i32 = 0;
-const S_FALSE: i32 = 1;
-
-fn to_wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
-}
-
-/// Built-in copy of `helpers/windows/Get-LiveCaptionsText.ps1` so a lone
-/// `interpres.exe` (e.g. `target/release` or a copied binary) still works.
-const EMBEDDED_UIA_HELPER: &str =
-    include_str!("../../helpers/windows/Get-LiveCaptionsText.ps1");
-
-/// Locate `Get-LiveCaptionsText.ps1` next to the binary, in parent trees
-/// (cargo layout: `target/release` → repo `helpers/`), cwd, or common layout.
-pub fn find_uia_helper() -> Option<PathBuf> {
-    let name = "Get-LiveCaptionsText.ps1";
-    let rel = Path::new("helpers").join("windows").join(name);
-    let mut candidates: Vec<PathBuf> = Vec::new();
-
-    if let Ok(exe) = std::env::current_exe() {
-        let mut dir = exe.parent().map(|p| p.to_path_buf());
-        // Walk up so `target/release/interpres.exe` finds repo helpers/.
-        for _ in 0..8 {
-            let Some(d) = dir else { break };
-            candidates.push(d.join(&rel));
-            candidates.push(d.join(name));
-            candidates.push(d.join("helpers").join("windows").join(name));
-            dir = d.parent().map(|p| p.to_path_buf());
+impl Reader {
+    fn spawn() -> Self {
+        let shared = Arc::new(Mutex::new(ReaderShared::default()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (sink, stop_t) = (shared.clone(), stop.clone());
+        let handle = thread::spawn(move || reader_thread(sink, stop_t));
+        crate::debuglog::log("caption reader started (in-process UIA)");
+        Self {
+            shared,
+            stop,
+            handle,
+            started: Instant::now(),
         }
     }
-    if let Ok(cwd) = std::env::current_dir() {
-        let mut dir = Some(cwd);
-        for _ in 0..6 {
-            let Some(d) = dir else { break };
-            candidates.push(d.join(&rel));
-            candidates.push(d.join(name));
-            candidates.push(d.join("helpers").join("windows").join(name));
-            dir = d.parent().map(|p| p.to_path_buf());
-        }
-    }
-    candidates.push(rel);
-    candidates.push(PathBuf::from(name));
 
-    for c in candidates {
-        if c.is_file() {
-            return Some(c);
-        }
+    fn snapshot(&self) -> (Option<CaptionRead>, Option<Instant>) {
+        self.shared
+            .lock()
+            .map(|g| (g.latest.clone(), g.at))
+            .unwrap_or((None, None))
     }
-    None
+
+    /// Signal stop. A thread wedged inside a UIA call is detached and exits when it returns.
+    fn abandon(self) {
+        self.stop.store(true, Ordering::SeqCst);
+    }
 }
 
-/// Prefer a real file on disk; otherwise write the embedded helper next to the
-/// exe (or under %TEMP%\Interpres) so listening never depends on packaging alone.
-pub fn resolve_uia_helper() -> Option<PathBuf> {
-    if let Some(p) = find_uia_helper() {
-        return Some(p);
-    }
-    materialize_embedded_helper()
-}
+fn reader_thread(shared: Arc<Mutex<ReaderShared>>, stop: Arc<AtomicBool>) {
+    let publish = |r: CaptionRead| {
+        if let Ok(mut g) = shared.lock() {
+            g.latest = Some(r);
+            g.at = Some(Instant::now());
+        }
+    };
 
-fn materialize_embedded_helper() -> Option<PathBuf> {
-    let name = "Get-LiveCaptionsText.ps1";
-    let mut targets: Vec<PathBuf> = Vec::new();
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            targets.push(dir.join(name));
-        }
-    }
-    targets.push(std::env::temp_dir().join("Interpres").join(name));
-
-    for t in targets {
-        if t.is_file() {
-            if let Ok(existing) = std::fs::read_to_string(&t) {
-                if existing.contains("CaptionsTextBlock") {
-                    return Some(t);
-                }
-            }
-        }
-        if let Some(parent) = t.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if std::fs::write(&t, EMBEDDED_UIA_HELPER).is_ok() {
-            return Some(t);
-        }
-    }
-    None
-}
-
-fn live_captions_window_found() -> bool {
+    let hr = unsafe { CoInitializeEx(ptr::null_mut(), COINIT_MULTITHREADED) };
     let signals = windows_signals();
-    let class = to_wide(
-        signals
-            .window_classes
-            .first()
-            .copied()
-            .unwrap_or("LiveCaptionsDesktopWindow"),
-    );
-    let hwnd = unsafe { FindWindowW(class.as_ptr(), ptr::null()) };
-    !hwnd.is_null()
-}
-
-/// Best-effort UIA read of CaptionsTextBlock Name.
-/// Full COM vtable walk is fragile; we use FindWindow + PowerShell UIAutomation.
-pub fn poll_text(presence: LiveCaptionsPresence) -> CaptureSnapshot {
-    if !live_captions_window_found() {
-        return CaptureSnapshot {
-            process_running: true,
-            detail: presence.detail,
-            surface_text: None,
-            error: Some(
-                "LiveCaptions process found but LiveCaptionsDesktopWindow not found \
-                 (is Live Captions open? Win+Ctrl+L)"
-                    .into(),
-            ),
-        };
-    }
-
-    if let Some(text) = try_uia_via_powershell() {
-        return CaptureSnapshot {
-            process_running: true,
-            detail: format!(
-                "{}; window=LiveCaptionsDesktopWindow; via=powershell-uia",
-                presence.detail
-            ),
-            surface_text: Some(text),
-            error: None,
-        };
-    }
-
-    let helper_hint = resolve_uia_helper()
-        .map(|p| format!("helper at {}", p.display()))
-        .unwrap_or_else(|| {
-            "could not locate or create Get-LiveCaptionsText.ps1".into()
-        });
-
-    CaptureSnapshot {
-        process_running: true,
-        detail: format!("{}; window=LiveCaptionsDesktopWindow", presence.detail),
-        surface_text: None,
-        error: Some(format!(
-            "UIA text scrape failed ({helper_hint}). \
-             Keep Live Captions open and showing text (Win+Ctrl+L). \
-             If this persists, run Diagnose or place Get-LiveCaptionsText.ps1 next to interpres.exe."
-        )),
-    }
-}
-
-fn try_uia_via_powershell() -> Option<String> {
-    let helper = resolve_uia_helper()?;
-    run_uia_helper(&helper)
-}
-
-fn run_uia_helper(helper: &Path) -> Option<String> {
-    // Prefer Windows PowerShell 5.1; fall back to pwsh if present.
-    // CREATE_NO_WINDOW is required: interpres is a GUI PE, so each unflagged
-    // powershell.exe poll would open a visible console (~every poll_ms).
-    for shell in ["powershell.exe", "powershell", "pwsh.exe", "pwsh"] {
-        let out = Command::new(shell)
-            .args([
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-WindowStyle",
-                "Hidden",
-                "-File",
-            ])
-            .arg(helper)
-            .creation_flags(CREATE_NO_WINDOW)
-            .output();
-        let Ok(out) = out else {
-            continue;
-        };
-        if out.status.success() {
-            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !s.is_empty() {
-                return Some(s);
+    let class = signals
+        .window_classes
+        .first()
+        .copied()
+        .unwrap_or("LiveCaptionsDesktopWindow");
+    // UIA client setup can fail transiently (E_FAIL) while another thread is
+    // initializing a client — e.g. a replaced reader still winding down. Retry briefly.
+    let mut attempt = 0;
+    let init = loop {
+        attempt += 1;
+        match CaptionsUia::new(class, signals.text_automation_ids) {
+            Err(e) if attempt < 5 => {
+                crate::debuglog::log(&format!("caption reader init attempt {attempt} failed: {e}"));
+                thread::sleep(Duration::from_millis(300));
             }
+            other => break other,
+        }
+    };
+    let mut uia = match init {
+        Ok(u) => u,
+        Err(e) => {
+            crate::debuglog::log(&format!("caption reader init failed: {e}"));
+            publish(CaptionRead::Error(e));
+            if hr >= 0 {
+                unsafe { CoUninitialize() };
+            }
+            return;
+        }
+    };
+    if !uia.has_timeouts {
+        crate::debuglog::log("caption reader: IUIAutomation2 unavailable — no per-call timeouts");
+    }
+
+    let mut last_kind = "";
+    while !stop.load(Ordering::SeqCst) {
+        let started = Instant::now();
+        let read = uia.read();
+        let took = started.elapsed();
+        let kind = match &read {
+            CaptionRead::Text(_) => "text",
+            CaptionRead::Waiting => "waiting",
+            CaptionRead::NoWindow => "no_window",
+            CaptionRead::Error(_) => "error",
+        };
+        if kind != last_kind || took > Duration::from_millis(1000) {
+            let extra = match &read {
+                CaptionRead::Error(e) => format!(" ({e})"),
+                _ => String::new(),
+            };
+            crate::debuglog::log(&format!(
+                "caption read: {kind}{extra} in {}ms",
+                took.as_millis()
+            ));
+            last_kind = kind;
+        }
+        if stop.load(Ordering::SeqCst) {
+            break;
+        }
+        publish(read);
+        thread::sleep(Duration::from_millis(READER_INTERVAL_MS));
+    }
+
+    drop(uia);
+    if hr >= 0 {
+        unsafe { CoUninitialize() };
+    }
+}
+
+struct ReaderSlot {
+    reader: Option<Reader>,
+    last_spawn: Option<Instant>,
+}
+
+static READER: Mutex<ReaderSlot> = Mutex::new(ReaderSlot {
+    reader: None,
+    last_spawn: None,
+});
+
+/// Stop the caption reader (engine stop / app exit). Safe to call anytime.
+pub fn shutdown_reader() {
+    let taken = READER.lock().ok().and_then(|mut g| g.reader.take());
+    if let Some(r) = taken {
+        r.abandon();
+        crate::debuglog::log("caption reader stopped");
+    }
+}
+
+/// Latest Live Captions text from the reader thread, restarting the reader when stuck.
+pub fn poll_text(presence: LiveCaptionsPresence) -> CaptureSnapshot {
+    let snap = |surface_text: Option<String>, error: Option<String>| CaptureSnapshot {
+        process_running: true,
+        detail: format!("{}; via=uia", presence.detail),
+        surface_text,
+        error,
+    };
+
+    let Ok(mut slot) = READER.lock() else {
+        return snap(None, Some("caption reader lock poisoned".into()));
+    };
+
+    if slot.reader.as_ref().is_some_and(|r| r.handle.is_finished()) {
+        // Thread ended on its own (UIA init failure). Keep its last error visible.
+        let r = slot.reader.take().expect("checked");
+        let (frame, _) = r.snapshot();
+        let backoff_over = slot
+            .last_spawn
+            .map_or(true, |t| t.elapsed() > RESPAWN_BACKOFF);
+        if !backoff_over {
+            let msg = match frame {
+                Some(CaptionRead::Error(e)) => e,
+                _ => "caption reader stopped unexpectedly".into(),
+            };
+            slot.reader = None;
+            return snap(None, Some(msg));
         }
     }
-    None
+
+    let mut fresh = false;
+    if slot.reader.is_none() {
+        slot.reader = Some(Reader::spawn());
+        slot.last_spawn = Some(Instant::now());
+        fresh = true;
+    }
+
+    let reader = slot.reader.as_ref().expect("reader present");
+    if fresh {
+        let deadline = Instant::now() + FIRST_READ_WAIT;
+        while reader.snapshot().1.is_none()
+            && !reader.handle.is_finished()
+            && Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    let (frame, at) = reader.snapshot();
+    let stuck = match at {
+        Some(at) => at.elapsed() > READER_HUNG_AFTER,
+        None => reader.started.elapsed() > READER_HUNG_AFTER,
+    };
+    if stuck {
+        let since = at.map_or(0, |a| a.elapsed().as_secs());
+        crate::debuglog::log(&format!(
+            "caption reader stuck (no read for {since}s) — replacing thread"
+        ));
+        if let Some(r) = slot.reader.take() {
+            r.abandon();
+        }
+        return snap(
+            None,
+            Some("Live Captions is not responding (restarting the reader)".into()),
+        );
+    }
+
+    match frame {
+        Some(CaptionRead::Text(t)) => snap(Some(t), None),
+        // Waiting for speech is not a failure — keep the error path quiet.
+        Some(CaptionRead::Waiting) | None => snap(None, None),
+        Some(CaptionRead::NoWindow) => snap(
+            None,
+            Some("Live Captions is running but its window was not found".into()),
+        ),
+        Some(CaptionRead::Error(e)) => snap(None, Some(format!("Live Captions read failed: {e}"))),
+    }
+}
+
+/// `C:\Windows\System32\LiveCaptions.exe` (what Win+Ctrl+L launches).
+fn live_captions_exe() -> PathBuf {
+    let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
+    PathBuf::from(root).join("System32").join("LiveCaptions.exe")
+}
+
+/// Turn on Windows Live Captions (same as Win+Ctrl+L when it is off).
+pub fn launch_live_captions() -> std::io::Result<()> {
+    Command::new(live_captions_exe()).spawn().map(|_| ())
+}
+
+/// Close and reopen Live Captions (recovers a frozen captions window).
+pub fn restart_live_captions() -> std::io::Result<()> {
+    shutdown_reader();
+    let _ = Command::new("taskkill")
+        .args(["/IM", "LiveCaptions.exe", "/F"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .status();
+    thread::sleep(Duration::from_millis(800));
+    launch_live_captions()
 }
 
 /// Extra diagnostics for `interpres diagnose` on Windows.
@@ -250,71 +277,27 @@ pub fn diagnose_lines() -> Vec<String> {
     let presence = super::detect::live_captions_present();
     lines.push(format!("process_running={}", presence.running));
     lines.push(format!("detail={}", presence.detail));
-    lines.push(format!("window_found={}", live_captions_window_found()));
-
-    match resolve_uia_helper() {
-        Some(h) => {
-            lines.push(format!("helper={}", h.display()));
-            match run_uia_helper(&h) {
-                Some(text) => {
-                    lines.push(format!("helper_ok=true chars={}", text.chars().count()));
-                    let preview: String = text.chars().take(120).collect();
-                    lines.push(format!("surface_preview={preview}"));
-                }
-                None => {
-                    lines.push("helper_ok=false (empty output or non-zero exit)".into());
-                    lines.push(
-                        "Tip: turn Live Captions on (Win+Ctrl+L) and play audio so text appears."
-                            .into(),
-                    );
-                }
-            }
-        }
-        None => {
-            lines.push("helper=not_found_and_could_not_materialize".into());
-            lines.push(
-                "Place Get-LiveCaptionsText.ps1 next to interpres.exe \
-                 (portable pack includes it; release builds also embed a fallback)."
-                    .into(),
-            );
-        }
-    }
 
     if presence.running {
+        let started = Instant::now();
         let snap = poll_text(presence);
+        lines.push(format!("first_read_ms={}", started.elapsed().as_millis()));
         lines.push(format!("poll_surface={}", snap.surface_text.is_some()));
+        if let Some(ref text) = snap.surface_text {
+            lines.push(format!("surface_chars={}", text.chars().count()));
+            let preview: String = text.chars().take(120).collect();
+            lines.push(format!("surface_preview={preview}"));
+        } else if snap.error.is_none() {
+            lines.push("waiting_for_speech=true (Live Captions open, no text yet)".into());
+        }
         if let Some(e) = snap.error {
             lines.push(format!("poll_error={e}"));
         }
+        shutdown_reader();
     }
 
     lines.push("Windows tip: Live Captions is Win+Ctrl+L (Settings → Accessibility → Captions).".into());
     lines
-}
-
-/// Supported primary scrape path is PowerShell + OS UIAutomation assemblies
-/// (silent via CREATE_NO_WINDOW). In-process COM UIA remains a scaffold only
-/// (PR6 spike deferred) so we never block releases on incomplete FFI.
-
-// Scaffold for a future full in-process UIA COM walk (no PowerShell).
-#[allow(dead_code)]
-fn _ensure_com_symbols_linked() {
-    unsafe {
-        let _ = CoInitializeEx(ptr::null_mut(), COINIT_APARTMENTTHREADED);
-        let mut punk: *mut core::ffi::c_void = ptr::null_mut();
-        let _ = CoCreateInstance(
-            &CLSID_CUI_AUTOMATION,
-            ptr::null_mut(),
-            CLSCTX_INPROC_SERVER,
-            &IID_IUI_AUTOMATION,
-            &mut punk,
-        );
-        if !punk.is_null() {
-            // Would Release via IUnknown — left as link-only scaffold for future full UIA.
-        }
-        let _ = (S_OK, S_FALSE);
-        CoUninitialize();
-    }
 }
 
 #[cfg(test)]
@@ -327,20 +310,44 @@ mod tests {
         assert_eq!(CREATE_NO_WINDOW, 0x0800_0000);
     }
 
+    /// Concurrent UIA client creation can E_FAIL; serialize tests that create clients.
+    static UIA_TEST_LOCK: Mutex<()> = Mutex::new(());
+
     #[test]
-    fn resolve_uia_helper_finds_or_materializes_script() {
-        let p = resolve_uia_helper().expect("helper path");
-        assert!(p.is_file(), "missing {}", p.display());
-        let body = std::fs::read_to_string(&p).expect("read helper");
-        assert!(
-            body.contains("CaptionsTextBlock"),
-            "helper does not look like UIA script"
-        );
+    fn uia_client_initializes_with_timeouts() {
+        // Exercises CoCreateInstance + CreatePropertyCondition vtable slots on this OS.
+        let _g = UIA_TEST_LOCK.lock();
+        unsafe { CoInitializeEx(ptr::null_mut(), COINIT_MULTITHREADED) };
+        let uia = CaptionsUia::new("LiveCaptionsDesktopWindow", &["CaptionsTextBlock", "CaptionsScrollViewer"])
+            .expect("UIA client");
+        assert!(uia.has_timeouts, "IUIAutomation2 expected on Windows 10/11");
     }
 
     #[test]
-    fn embedded_helper_source_is_nonempty() {
-        assert!(EMBEDDED_UIA_HELPER.contains("LiveCaptionsDesktopWindow"));
-        assert!(EMBEDDED_UIA_HELPER.contains("CaptionsTextBlock"));
+    fn uia_read_without_window_reports_no_window() {
+        let _g = UIA_TEST_LOCK.lock();
+        unsafe { CoInitializeEx(ptr::null_mut(), COINIT_MULTITHREADED) };
+        let mut uia = CaptionsUia::new("InterpresNoSuchWindowClass", &["CaptionsTextBlock"])
+            .expect("UIA client");
+        assert_eq!(uia.read(), CaptionRead::NoWindow);
+    }
+
+    /// Manual: `cargo test --lib dump_live_surface -- --ignored --nocapture` with LC open.
+    #[test]
+    #[ignore]
+    fn dump_live_surface() {
+        let presence = super::super::detect::live_captions_present();
+        let snap = poll_text(presence);
+        println!("error={:?}", snap.error);
+        for (i, line) in snap.surface_text.unwrap_or_default().split('\n').enumerate() {
+            println!("{i:02}: {line:?}");
+        }
+        shutdown_reader();
+    }
+
+    #[test]
+    fn live_captions_exe_is_under_system32() {
+        let p = live_captions_exe();
+        assert!(p.ends_with("System32\\LiveCaptions.exe") || p.ends_with("System32/LiveCaptions.exe"));
     }
 }

@@ -9,6 +9,9 @@ pub mod macos;
 #[cfg(windows)]
 pub mod windows;
 
+#[cfg(windows)]
+mod windows_uia;
+
 pub use detect::{live_captions_present, LiveCaptionsPresence};
 pub use signals::{macos_signals, windows_signals, SignalTable};
 
@@ -20,6 +23,14 @@ pub struct CaptureSnapshot {
     /// Full caption surface text if scrape succeeded.
     pub surface_text: Option<String>,
     pub error: Option<String>,
+}
+
+/// Release long-lived capture resources (Windows caption reader). No-op elsewhere.
+pub fn shutdown_capture() {
+    #[cfg(windows)]
+    {
+        windows::shutdown_reader();
+    }
 }
 
 /// Poll once: process presence + best-effort text.

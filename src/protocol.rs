@@ -202,33 +202,25 @@ pub fn escape_text(s: &str) -> String {
     out
 }
 
+/// Decode `%XX` escapes. Decoded bytes are reassembled as UTF-8 so `%C3%A9` → `é`;
+/// malformed escapes are kept literally.
 pub fn unescape_text(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '%' {
-            let h1 = chars.next();
-            let h2 = chars.next();
-            if let (Some(a), Some(b)) = (h1, h2) {
-                let hex = format!("{a}{b}");
-                if let Ok(byte) = u8::from_str_radix(&hex, 16) {
-                    out.push(byte as char);
-                    continue;
-                }
-                out.push('%');
-                out.push(a);
-                out.push(b);
-            } else {
-                out.push('%');
-                if let Some(a) = h1 {
-                    out.push(a);
-                }
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = |b: u8| (b as char).to_digit(16);
+            if let (Some(h), Some(l)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+                continue;
             }
-        } else {
-            out.push(c);
         }
+        out.push(bytes[i]);
+        i += 1;
     }
-    out
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 impl fmt::Display for CaptionEvent {
@@ -270,6 +262,18 @@ mod tests {
                 assert_eq!(lc, LcState::Running);
                 assert_eq!(reason, "LiveCaptions process");
             }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unescape_keeps_utf8_and_plain_text() {
+        assert_eq!(unescape_text("caf%C3%A9%20au%20lait"), "café au lait");
+        assert_eq!(unescape_text("Plain text works too"), "Plain text works too");
+        assert_eq!(unescape_text("100%25 sure"), "100% sure");
+        assert_eq!(unescape_text("bad %zz and tail %"), "bad %zz and tail %");
+        match CaptionEvent::parse_line("FINAL text=Résumé ready, see you Tuesday") {
+            CaptionEvent::Final { text } => assert_eq!(text, "Résumé ready, see you Tuesday"),
             other => panic!("unexpected {other:?}"),
         }
     }

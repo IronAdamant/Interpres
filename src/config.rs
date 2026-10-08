@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 /// Runtime configuration for Interpres.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
-    /// When true, write session transcripts to disk.
+    /// When true, write session transcripts to disk (default on: the point is keeping notes).
     pub remember: bool,
     /// Sticky user-chosen folder for transcripts. Empty means default Documents path.
     pub transcript_folder: PathBuf,
@@ -20,18 +20,24 @@ pub struct Config {
     pub poll_ms: u64,
     /// Optional override path to a caption helper binary/script.
     pub helper_path: Option<PathBuf>,
-    /// Caption source: `os` (default), `demo` (fixture/stdin), or helper path mode.
+    /// Caption source: `os` (Live Captions, default), `engine` (external speech engine at
+    /// `helper_path` + `helper_args`, see docs/ENGINES.md), or `demo`.
     pub source: String,
+    /// Arguments for the external engine (quotes group words: `-u "C:\my engine.py"`).
+    pub helper_args: String,
     /// Write debug logs into the transcript folder (`interpres-debug.log` / session `.debug.log`).
     pub debug: bool,
     /// UI appearance: system (follow OS), light, or dark. Does not affect capture.
     pub theme: ThemeMode,
+    /// Ask "are you done?" after this many minutes with no new captions (0 = never).
+    /// Recording never stops on its own.
+    pub idle_prompt_minutes: u64,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
-            remember: false,
+            remember: true,
             transcript_folder: default_transcript_folder(),
             write_jsonl: false,
             // LC process detection can blip under load; keep debounce ≥ lifecycle floor.
@@ -40,8 +46,10 @@ impl Default for Config {
             poll_ms: 150,
             helper_path: None,
             source: "os".to_string(),
+            helper_args: String::new(),
             debug: false,
             theme: ThemeMode::System,
+            idle_prompt_minutes: 3,
         }
     }
 }
@@ -81,6 +89,28 @@ pub fn config_path() -> PathBuf {
 }
 
 impl Config {
+    /// True when the user chose an external speech engine and configured its path.
+    pub fn uses_external_engine(&self) -> bool {
+        self.source == "engine" && self.helper_path.is_some()
+    }
+
+    /// Short display name for the external engine (file stem of the script or program).
+    pub fn engine_name(&self) -> String {
+        let args = split_args(&self.helper_args);
+        // `python -u engine.py` → "engine"; a direct exe → its own stem.
+        let script = args.iter().find(|a| {
+            let l = a.to_ascii_lowercase();
+            l.ends_with(".py") || l.ends_with(".js") || l.ends_with(".ps1") || l.ends_with(".sh")
+        });
+        let path = script
+            .map(PathBuf::from)
+            .or_else(|| self.helper_path.clone())
+            .unwrap_or_default();
+        path.file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "engine".into())
+    }
+
     pub fn load() -> Self {
         let path = config_path();
         Self::load_from(&path)
@@ -127,6 +157,7 @@ impl Config {
                         cfg.helper_path = Some(PathBuf::from(v));
                     }
                 }
+                "helper_args" => cfg.helper_args = v.to_string(),
                 "source" => {
                     if !v.is_empty() {
                         cfg.source = v.to_string();
@@ -134,6 +165,11 @@ impl Config {
                 }
                 "debug" => cfg.debug = parse_bool(v),
                 "theme" => cfg.theme = ThemeMode::parse(v),
+                "idle_prompt_minutes" => {
+                    if let Ok(n) = v.parse() {
+                        cfg.idle_prompt_minutes = n;
+                    }
+                }
                 _ => {}
             }
         }
@@ -175,11 +211,43 @@ impl Config {
                 .map(|p| p.display().to_string())
                 .unwrap_or_default()
         )?;
+        writeln!(f, "helper_args={}", self.helper_args)?;
         writeln!(f, "source={}", self.source)?;
         writeln!(f, "debug={}", if self.debug { "true" } else { "false" })?;
         writeln!(f, "theme={}", self.theme.as_str())?;
+        writeln!(f, "idle_prompt_minutes={}", self.idle_prompt_minutes)?;
         Ok(())
     }
+}
+
+/// Split a command-line style argument string. Double quotes group words; no escapes.
+pub fn split_args(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut in_quotes = false;
+    let mut has_token = false;
+    for c in s.chars() {
+        match c {
+            '"' => {
+                in_quotes = !in_quotes;
+                has_token = true;
+            }
+            c if c.is_whitespace() && !in_quotes => {
+                if has_token {
+                    out.push(std::mem::take(&mut cur));
+                    has_token = false;
+                }
+            }
+            c => {
+                cur.push(c);
+                has_token = true;
+            }
+        }
+    }
+    if has_token {
+        out.push(cur);
+    }
+    out
 }
 
 fn parse_bool(v: &str) -> bool {
@@ -203,10 +271,49 @@ mod tests {
     }
 
     #[test]
+    fn split_args_handles_quoted_paths() {
+        assert_eq!(
+            split_args(r#"-u "C:\My Engines\phonon.py" --model  C:\models\p2"#),
+            vec!["-u", r"C:\My Engines\phonon.py", "--model", r"C:\models\p2"]
+        );
+        assert_eq!(split_args(""), Vec::<String>::new());
+        assert_eq!(split_args(r#"a "" b"#), vec!["a", "", "b"]);
+    }
+
+    #[test]
+    fn external_engine_settings_roundtrip() {
+        let path = temp_conf();
+        let mut cfg = Config::default();
+        cfg.source = "engine".into();
+        cfg.helper_path = Some(PathBuf::from(r"C:\Python313\python.exe"));
+        cfg.helper_args = r#"-u "C:\engines\phonon_engine.py""#.into();
+        cfg.save_to(&path).unwrap();
+        let loaded = Config::load_from(&path);
+        assert!(loaded.uses_external_engine());
+        assert_eq!(loaded.helper_args, cfg.helper_args);
+        assert_eq!(loaded.engine_name(), "phonon_engine");
+        let _ = fs::remove_file(path);
+        assert!(!Config::default().uses_external_engine());
+    }
+
+    #[test]
+    fn saving_defaults_on_but_respects_explicit_off() {
+        assert!(Config::default().remember, "new installs save transcripts");
+        let path = temp_conf();
+        fs::write(&path, "remember=false
+").unwrap();
+        assert!(!Config::load_from(&path).remember, "existing OFF choice kept");
+        fs::write(&path, "theme=dark
+").unwrap();
+        assert!(Config::load_from(&path).remember, "missing key → default on");
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn roundtrip_sticky_folder_and_remember() {
         let path = temp_conf();
         let mut cfg = Config::default();
-        cfg.remember = true;
+        cfg.remember = false;
         cfg.transcript_folder = PathBuf::from("/Users/example/My Captions");
         cfg.write_jsonl = true;
         cfg.off_delay_ms = 3000;
@@ -214,7 +321,7 @@ mod tests {
         cfg.theme = ThemeMode::Light;
         cfg.save_to(&path).expect("save");
         let loaded = Config::load_from(&path);
-        assert_eq!(loaded.remember, true);
+        assert_eq!(loaded.remember, false);
         assert_eq!(
             loaded.transcript_folder,
             PathBuf::from("/Users/example/My Captions")

@@ -1,6 +1,6 @@
 [package]
 name = "interpres"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 description = "Local companion that saves Windows and macOS Live Captions as dated session transcripts"
 license = "MIT OR Apache-2.0"

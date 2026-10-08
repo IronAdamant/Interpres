@@ -108,6 +108,16 @@ impl TranscriptWriter {
         self.write_caption(clock_hhmmss, text, false)
     }
 
+    /// Append a caption exactly as given (external engines: each FINAL is authoritative,
+    /// so no same-family merging — a repeated "Yes." is a real second line).
+    pub fn append_final(&mut self, clock_hhmmss: &str, text: &str) -> io::Result<()> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Ok(());
+        }
+        self.append_caption(clock_hhmmss, text)
+    }
+
     /// Polish path: same family rewrite rules; still appends only on NoMatch.
     pub fn write_revised(&mut self, clock_hhmmss: &str, text: &str) -> io::Result<()> {
         self.write_caption(clock_hhmmss, text, true)
@@ -176,10 +186,12 @@ impl TranscriptWriter {
     ) -> io::Result<()> {
         use std::io::{Seek, SeekFrom};
 
+        // Keep the time the line was first heard; a later polish must not move it.
+        let clock = caption_clock(&lines[line_i]).unwrap_or(clock_hhmmss);
         let mut body = String::new();
         for (i, l) in lines.iter().enumerate() {
             if i == line_i {
-                body.push_str(&format!("[{clock_hhmmss}] {text}\n"));
+                body.push_str(&format!("[{clock}] {text}\n"));
             } else {
                 body.push_str(l);
                 body.push('\n');
@@ -242,6 +254,21 @@ impl TranscriptWriter {
         Ok(())
     }
 
+    /// Write a `# …` note line (e.g. Live Captions turned off / back on mid-session).
+    pub fn write_note(&mut self, clock_hhmmss: &str, note: &str) -> io::Result<()> {
+        writeln!(self.txt, "# [{clock_hhmmss}] {note}")?;
+        self.txt.flush()?;
+        if let Some(ref mut j) = self.jsonl {
+            let esc = json_escape(note);
+            writeln!(
+                j,
+                "{{\"v\":1,\"t\":\"{clock_hhmmss}\",\"kind\":\"note\",\"text\":\"{esc}\"}}"
+            )?;
+            j.flush()?;
+        }
+        Ok(())
+    }
+
     pub fn end_session(&mut self, reason: &str) -> io::Result<()> {
         writeln!(self.txt)?;
         writeln!(self.txt, "# Session ended ({reason})")?;
@@ -261,6 +288,13 @@ impl TranscriptWriter {
 fn is_caption_line(l: &str) -> bool {
     let t = l.trim_start();
     t.starts_with('[') && t.contains(']') && !t.starts_with("#")
+}
+
+/// `HH:MM:SS` from a `[HH:MM:SS] text` caption line.
+fn caption_clock(line: &str) -> Option<&str> {
+    let rest = line.trim_start().strip_prefix('[')?;
+    let end = rest.find(']')?;
+    Some(&rest[..end])
 }
 
 fn caption_body(line: &str) -> String {
@@ -453,6 +487,36 @@ mod tests {
         assert_eq!(bodies.len(), 1);
         assert!(bodies[0].contains("going on there"));
         assert_eq!(w.line_count(), 1);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn polish_keeps_time_line_was_first_heard() {
+        // Field log: "[07:04:19] good good yeah." landed above "[07:04:16] is that better,".
+        let dir = temp_dir("clock");
+        let mut w = open_writer(&dir);
+        let path = w.txt_path().to_path_buf();
+        w.write_final("07:04:10", "Good good yeah").unwrap();
+        w.write_final("07:04:16", "Is that better?").unwrap();
+        w.write_revised("07:04:25", "Good, good yeah, had a read up on you").unwrap();
+        let raw = fs::read_to_string(&path).unwrap();
+        let clocks: Vec<&str> = raw.lines().filter_map(caption_clock).collect();
+        assert_eq!(clocks, ["07:04:10", "07:04:16"], "{raw}");
+        assert!(raw.contains("[07:04:10] Good, good yeah, had a read up on you"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn note_lines_are_not_captions() {
+        let dir = temp_dir("note");
+        let mut w = open_writer(&dir);
+        let path = w.txt_path().to_path_buf();
+        w.write_final("10:00:00", "First caption line here").unwrap();
+        w.write_note("10:00:05", "Live Captions turned off").unwrap();
+        w.write_final("10:01:00", "Second caption line here").unwrap();
+        assert_eq!(caption_bodies(&path).len(), 2);
+        let raw = fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("# [10:00:05] Live Captions turned off"));
         let _ = fs::remove_dir_all(dir);
     }
 

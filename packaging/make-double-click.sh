@@ -11,12 +11,11 @@ cargo build --release
 
 DIST="$ROOT/dist/Interpres"
 rm -rf "$DIST"
-mkdir -p "$DIST/helpers/macos" "$DIST/helpers/windows"
+mkdir -p "$DIST/helpers/macos"
 
 cp "$ROOT/target/release/interpres" "$DIST/interpres"
 chmod +x "$DIST/interpres"
 cp "$ROOT/helpers/macos/captions_loop.sh" "$DIST/helpers/macos/" 2>/dev/null || true
-cp "$ROOT/helpers/windows/Get-LiveCaptionsText.ps1" "$DIST/helpers/windows/" 2>/dev/null || true
 cp "$ROOT/README.md" "$DIST/README.md"
 
 # --- Double-click on Mac: .command opens Terminal ---

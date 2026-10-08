@@ -74,7 +74,7 @@ pub fn listening_status() -> &'static str {
 pub fn idle_setup_status() -> &'static str {
     #[cfg(windows)]
     {
-        "Turn on Windows Live Captions first (Win+Ctrl+L), then press Start listening. Interpres cannot caption by itself."
+        "Turn on Windows Live Captions first (Win+Ctrl+L), then press Start recording. Interpres cannot caption by itself."
     }
     #[cfg(target_os = "macos")]
     {

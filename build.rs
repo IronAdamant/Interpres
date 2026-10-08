@@ -81,8 +81,8 @@ fn build_windows_resources(manifest: &Path, out_dir: &Path) {
          1 ICON \"{ico_escaped}\"\n\
          \n\
          1 VERSIONINFO\n\
-         FILEVERSION    0,2,0,0\n\
-         PRODUCTVERSION 0,2,0,0\n\
+         FILEVERSION    0,3,0,0\n\
+         PRODUCTVERSION 0,3,0,0\n\
          FILEFLAGSMASK  0x3fL\n\
          FILEFLAGS      0x0L\n\
          FILEOS         0x40004L\n\
@@ -95,12 +95,12 @@ fn build_windows_resources(manifest: &Path, out_dir: &Path) {
              BEGIN\n\
                VALUE \"CompanyName\",      \"Interpres Contributors\"\n\
                VALUE \"FileDescription\",  \"Interpres Live Captions companion\"\n\
-               VALUE \"FileVersion\",      \"0.2.0\"\n\
+               VALUE \"FileVersion\",      \"0.3.0\"\n\
                VALUE \"InternalName\",     \"interpres\"\n\
                VALUE \"LegalCopyright\",   \"MIT OR Apache-2.0\"\n\
                VALUE \"OriginalFilename\", \"interpres.exe\"\n\
                VALUE \"ProductName\",      \"Interpres\"\n\
-               VALUE \"ProductVersion\",   \"0.2.0\"\n\
+               VALUE \"ProductVersion\",   \"0.3.0\"\n\
              END\n\
            END\n\
            BLOCK \"VarFileInfo\"\n\

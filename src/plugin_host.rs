@@ -5,6 +5,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
+use std::time::{Duration, Instant};
+
+/// After SHUTDOWN, give the helper this long to print its last lines and exit.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 
 use crate::protocol::CaptionEvent;
 
@@ -50,11 +54,15 @@ impl PluginHost {
                 }
             }
         });
-        // Drain stderr to avoid blocking
+        // Drain stderr (a full pipe would block the helper); keep it for troubleshooting.
         if let Some(stderr) = child.stderr.take() {
             thread::spawn(move || {
                 let reader = BufReader::new(stderr);
-                for _ in reader.lines() {}
+                for line in reader.lines().map_while(Result::ok) {
+                    if !line.trim().is_empty() {
+                        crate::debuglog::log(&format!("engine stderr: {line}"));
+                    }
+                }
             });
         }
 
@@ -68,16 +76,55 @@ impl PluginHost {
         self.rx.as_ref()?.try_recv().ok()
     }
 
-    pub fn shutdown(&mut self) {
+    /// `Some(description)` once the helper process has exited.
+    pub fn exit_status(&mut self) -> Option<String> {
+        let child = self.child.as_mut()?;
+        match child.try_wait() {
+            Ok(Some(status)) => Some(status.to_string()),
+            Ok(None) => None,
+            Err(e) => Some(format!("unknown ({e})")),
+        }
+    }
+
+    /// Ask the helper to stop (SHUTDOWN + stdin close), wait briefly so it can print its
+    /// last lines, then kill it. Returns any events it printed while finishing.
+    pub fn shutdown_collect(&mut self) -> Vec<CaptionEvent> {
+        let mut tail = Vec::new();
         if let Some(child) = self.child.as_mut() {
             if let Some(mut stdin) = child.stdin.take() {
                 let _ = writeln!(stdin, "SHUTDOWN");
+                let _ = stdin.flush();
+                // Dropping stdin closes it: helpers may also stop on EOF.
+            }
+            let deadline = Instant::now() + SHUTDOWN_GRACE;
+            while Instant::now() < deadline {
+                if let Ok(Some(_)) = child.try_wait() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(50));
             }
             let _ = child.kill();
             let _ = child.wait();
         }
+        if let Some(rx) = self.rx.as_ref() {
+            // Reader thread ends at EOF once the process is gone.
+            let deadline = Instant::now() + Duration::from_millis(500);
+            loop {
+                match rx.recv_timeout(Duration::from_millis(50)) {
+                    Ok(ev) => tail.push(ev),
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(mpsc::RecvTimeoutError::Timeout) if Instant::now() >= deadline => break,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                }
+            }
+        }
         self.child = None;
         self.rx = None;
+        tail
+    }
+
+    pub fn shutdown(&mut self) {
+        let _ = self.shutdown_collect();
     }
 }
 
@@ -92,7 +139,8 @@ impl Drop for PluginHost {
 pub fn default_helper_path() -> Option<PathBuf> {
     #[cfg(windows)]
     {
-        return crate::platform::windows::resolve_uia_helper();
+        // Windows reads Live Captions in-process (UI Automation); no default helper.
+        return None;
     }
     #[cfg(target_os = "macos")]
     {
@@ -142,4 +190,64 @@ pub fn run_demo_source(tx: Sender<CaptionEvent>) {
         lc: crate::protocol::LcState::Stopped,
         reason: "demo_done".into(),
     });
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    fn cmd() -> PathBuf {
+        let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
+        PathBuf::from(root).join("System32").join("cmd.exe")
+    }
+
+    fn wait_events(host: &mut PluginHost, n: usize) -> Vec<CaptionEvent> {
+        let mut got = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while got.len() < n && Instant::now() < deadline {
+            match host.try_recv() {
+                Some(ev) => got.push(ev),
+                None => thread::sleep(Duration::from_millis(20)),
+            }
+        }
+        got
+    }
+
+    #[test]
+    fn engine_lines_arrive_and_exit_is_detected() {
+        let mut host = PluginHost::start(
+            &cmd(),
+            &["/C", "echo READY&echo PARTIAL text=Hello th&echo FINAL text=Hello there."],
+        )
+        .expect("start cmd");
+        let got = wait_events(&mut host, 3);
+        assert_eq!(got[0], CaptionEvent::Ready);
+        assert_eq!(
+            got[2],
+            CaptionEvent::Final {
+                text: "Hello there.".into()
+            }
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while host.exit_status().is_none() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(host.exit_status().is_some(), "exit must be detected");
+    }
+
+    #[test]
+    fn shutdown_collects_lines_printed_while_finishing() {
+        // Engine waits for a stdin line (SHUTDOWN), then prints its last caption.
+        let mut host = PluginHost::start(&cmd(), &["/C", "set /p x=&echo FINAL text=last words"])
+            .expect("start cmd");
+        thread::sleep(Duration::from_millis(200));
+        assert!(host.exit_status().is_none(), "still waiting for SHUTDOWN");
+        let tail = host.shutdown_collect();
+        assert!(
+            tail.contains(&CaptionEvent::Final {
+                text: "last words".into()
+            }),
+            "{tail:?}"
+        );
+    }
 }

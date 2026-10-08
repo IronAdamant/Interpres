@@ -167,6 +167,12 @@ fn apply_event(ev: EngineEvent, last_hist: &Arc<Mutex<String>>) {
             }
         }
         EngineEvent::Error(s) => set_status(&format!("⚠ {s}")),
+        // Mac UI redesign comes later; for now surface only real problems in Status.
+        EngineEvent::Health(h) => {
+            if h.is_problem() {
+                set_status(&format!("⚠ {} — {}", h.headline(), h.guidance()));
+            }
+        }
         EngineEvent::SessionFile(Some(p)) => {
             set_session(Some(&p.display().to_string()));
             if let Some(parent) = p.parent() {

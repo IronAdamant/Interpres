@@ -135,7 +135,12 @@ impl CaptionBuffer {
         }
         for c in self.committed.iter_mut() {
             if same_or_refinement(c, line) {
-                if prefer_polish(c, line) {
+                // Leaving the window / session end: LC has settled, so a version that keeps
+                // every word and adds more wins over an early full stop ("Third sentence."
+                // → "Third sentence asks who you are solving"). Mid-stream this would glue
+                // the next sentence on before LC splits it, so only here.
+                let settled_extension = leave_window && extends_by_words(c, line, 2);
+                if settled_extension || prefer_polish(c, line) {
                     *c = line.to_string();
                     return CommitOutcome::Revised(line.to_string());
                 }
@@ -1216,6 +1221,15 @@ pub fn prefer_polish(existing: &str, candidate: &str) -> bool {
     line_quality(candidate) > line_quality(existing)
 }
 
+/// `longer` repeats every word of `shorter` (ignoring case/punctuation) and adds `min_extra`+ words.
+fn extends_by_words(shorter: &str, longer: &str, min_extra: usize) -> bool {
+    let a = normalize_for_cmp(shorter);
+    let b = normalize_for_cmp(longer);
+    let ta: Vec<&str> = a.split_whitespace().collect();
+    let tb: Vec<&str> = b.split_whitespace().collect();
+    !ta.is_empty() && tb.len() >= ta.len() + min_extra && tb[..ta.len()] == ta[..]
+}
+
 /// Higher is better (longer + complete sentences score more).
 pub fn line_quality(s: &str) -> usize {
     let mut q = s.len();
@@ -1227,6 +1241,43 @@ pub fn line_quality(s: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn settled_extension_beats_early_full_stop_at_session_end() {
+        // Field: LC showed "Third sentence." then grew it but never re-punctuated.
+        let mut b = CaptionBuffer::new();
+        let mut finals = Vec::new();
+        let collect = |e: BufferEmit, out: &mut Vec<String>| match e {
+            BufferEmit::Final(t) | BufferEmit::Revised(t) => out.push(t),
+            BufferEmit::Finals(v) => out.extend(v),
+            BufferEmit::Batch { revised, finals } => {
+                out.extend(revised);
+                out.extend(finals);
+            }
+            _ => {}
+        };
+        for _ in 0..3 {
+            collect(b.observe("Third sentence."), &mut finals);
+        }
+        for _ in 0..6 {
+            collect(b.observe("Third sentence asks who you are solving"), &mut finals);
+        }
+        collect(b.finish(), &mut finals);
+        assert_eq!(
+            finals.last().map(String::as_str),
+            Some("Third sentence asks who you are solving"),
+            "{finals:?}"
+        );
+    }
+
+    #[test]
+    fn mid_stream_does_not_glue_next_sentence_onto_complete_line() {
+        // Field: "…where the project is." became "…is at the first milestone is finished and".
+        assert!(!prefer_polish(
+            "let me walk you through where the project is.",
+            "let me walk you through where the project is at the first milestone is finished and"
+        ));
+    }
+
     use super::*;
 
     /// Real chrome strings from user sessions / KNOWN-ISSUES (must all be junk).

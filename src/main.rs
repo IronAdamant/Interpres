@@ -297,7 +297,7 @@ Not a speech engine. Requires Windows Live Captions (Win+Ctrl+L). Cannot work al
 Cannot guarantee 100% accuracy — only that captions can be saved when LC works.
 
 Easy: download a Release pack, double-click interpres.exe (app window only — no console).
-Optional: Save to disk ON. Keep Get-LiveCaptionsText.ps1 next to the exe.
+Optional: Save to disk ON. Nothing else to install — captions are read in-process.
 
 Commands (advanced — these print here in the terminal):
   gui | run | probe | diagnose | set-folder | remember | demo | help | cli
@@ -732,9 +732,13 @@ fn run_in_process(cfg: &Config) -> i32 {
     }
     println!("If nothing appears, run:  interpres diagnose");
 
+    let mut last_tick = std::time::Instant::now();
     while !stop.load(Ordering::SeqCst) {
         let snap = platform::poll_capture();
-        let action = life.tick(snap.process_running, cfg.poll_ms);
+        // Real elapsed time so slow polls cannot stretch the LC-off debounce.
+        let elapsed_ms = last_tick.elapsed().as_millis() as u64;
+        last_tick = std::time::Instant::now();
+        let action = life.tick(snap.process_running, elapsed_ms);
 
         match action {
             LifecycleAction::Open => {
@@ -829,6 +833,7 @@ fn run_in_process(cfg: &Config) -> i32 {
         let _ = w.end_session("user");
         println!("Saved: {}", w.txt_path().display());
     }
+    platform::shutdown_capture();
     0
 }
 

@@ -47,12 +47,9 @@ if (-not (Test-Path $ExeSrc)) {
 
 $Dist = Join-Path $Root 'dist\Interpres-windows'
 if (Test-Path $Dist) { Remove-Item -Recurse -Force $Dist }
-New-Item -ItemType Directory -Path (Join-Path $Dist 'helpers\windows') | Out-Null
+New-Item -ItemType Directory -Path $Dist | Out-Null
 
 Copy-Item $ExeSrc (Join-Path $Dist 'interpres.exe')
-Copy-Item (Join-Path $Root 'helpers\windows\Get-LiveCaptionsText.ps1') (Join-Path $Dist 'helpers\windows\Get-LiveCaptionsText.ps1')
-# Also put helper next to the exe for simplest discovery
-Copy-Item (Join-Path $Root 'helpers\windows\Get-LiveCaptionsText.ps1') (Join-Path $Dist 'Get-LiveCaptionsText.ps1')
 Copy-Item (Join-Path $Root 'README.md') (Join-Path $Dist 'README.md')
 # Windows pack branding: cleaned symbol (logo-256). Mac uses the same mark via
 # logo.png / logo-1024.png / Interpres.icns (regenerated from logo-256).
@@ -131,16 +128,21 @@ WHAT THIS IS
   Not a captioner by itself. Everything stays on your PC.
 
 EASY START (no tech skills needed)
-  1. Turn on Live Captions:  Win + Ctrl + L
-  2. Play audio so captions appear on screen
-  3. Double-click  interpres.exe  (or Open Interpres.bat)
-  4. Press Start listening
-  5. Optional: Save to disk ON, Choose folder
-     Default folder: Documents\Interpres Transcripts
+  1. Double-click  interpres.exe  (or Open Interpres.bat)
+  2. If the banner says Live Captions is off, press  Turn on Live Captions
+     (or press Win + Ctrl + L yourself)
+  3. Press  Start recording  before your meeting
+  4. Green banner = recording. Red banner = captions are being missed:
+     press the button it shows (Turn on / Restart Live Captions).
+  5. Press  Stop recording  when you are done. If it goes quiet for a few
+     minutes, Interpres asks whether you are done - it never stops by itself.
+
+  Transcripts are saved automatically (turn off under Settings).
+  Files go to Documents\Interpres Transcripts (change it under Settings).
 
 TIPS
-  - You should NOT see terminal windows pop up while listening.
-  - Get-LiveCaptionsText.ps1 is included (and the app can recreate it if missing).
+  - Open transcript / Copy all at the bottom put the text straight into your notes.
+  - If Live Captions restarts mid-meeting, the same file continues.
   - Wrong words in the file usually mean Live Captions misheard them.
 
 ALSO TRY
