@@ -74,6 +74,8 @@ const EM_SETSEL: u32 = 0x00B1;
 const EM_LINESCROLL: u32 = 0x00B6;
 const EM_SCROLLCARET: u32 = 0x00B7;
 const EM_GETFIRSTVISIBLELINE: u32 = 0x00CE;
+const EM_REPLACESEL: u32 = 0x00C2;
+const EM_SETLIMITTEXT: u32 = 0x00C5;
 const SB_VERT: c_int = 1;
 const SIF_ALL: u32 = 0x17;
 
@@ -553,6 +555,10 @@ struct View {
     transcript_dirty: bool,
     last_render: Option<Instant>,
     rendered_banner: String,
+    /// Rows currently in the transcript control (each ends with CRLF) and their UTF-16
+    /// lengths, so updates only replace the changed tail instead of the whole text.
+    rendered_rows: Vec<String>,
+    rendered_u16: Vec<usize>,
     /// Stop pressed; engine is saving the last words.
     stopping: bool,
     idle: IdlePrompt,
@@ -820,15 +826,15 @@ impl AppCtx {
         }
     }
 
-    fn transcript_text(&self) -> String {
+    /// Transcript rows as shown (each ends with CRLF): saved lines, then the live line.
+    fn transcript_rows(&self) -> Vec<String> {
         let v = &self.view;
-        let mut out = String::new();
-        for (t, line) in v.times.iter().zip(&v.lines) {
-            out.push_str(t);
-            out.push_str("   ");
-            out.push_str(line);
-            out.push_str("\r\n");
-        }
+        let mut out: Vec<String> = v
+            .times
+            .iter()
+            .zip(&v.lines)
+            .map(|(t, line)| format!("{t}   {line}\r\n"))
+            .collect();
         let live = v.live.trim();
         // Live Captions can re-show an older line; only show text not already saved.
         let live_is_new = !live.is_empty()
@@ -839,16 +845,17 @@ impl AppCtx {
                 .take(6)
                 .any(|l| l == live || same_or_refinement(l, live));
         if v.listening && live_is_new {
-            out.push_str("   …     ");
-            out.push_str(&live.replace('\n', " "));
-            out.push_str("\r\n");
+            out.push(format!("   …     {}\r\n", live.replace('\n', " ")));
         }
         if out.is_empty() {
-            out.push_str(if v.listening {
-                "Captions will appear here as Live Captions shows them."
-            } else {
-                "Press Start recording. Captions will appear here, and are saved to a file as you go."
-            });
+            out.push(
+                if v.listening {
+                    "Captions will appear here as they come in."
+                } else {
+                    "Press Start recording. Captions will appear here, and are saved to a file as you go."
+                }
+                .to_string(),
+            );
         }
         out
     }
@@ -964,10 +971,28 @@ fn set_enabled(hwnd: Hwnd, on: bool) {
     }
 }
 
-/// Replace transcript text, keeping the reader's scroll position unless at the bottom.
+/// Index of the first row that differs (rows after it must be re-rendered).
+fn first_changed_row(old: &[String], new: &[String]) -> usize {
+    old.iter()
+        .zip(new)
+        .position(|(a, b)| a != b)
+        .unwrap_or_else(|| old.len().min(new.len()))
+}
+
+/// Update transcript text by replacing only the changed tail (cheap for 2 h of lines),
+/// keeping the reader's scroll position unless they are at the bottom.
 fn render_transcript(app: &mut AppCtx) {
     let hwnd = app.c.transcript;
-    let text = app.transcript_text();
+    let rows = app.transcript_rows();
+    let k = first_changed_row(&app.view.rendered_rows, &rows);
+    if k == rows.len() && k == app.view.rendered_rows.len() {
+        app.view.transcript_dirty = false;
+        return;
+    }
+    let start: usize = app.view.rendered_u16[..k].iter().sum();
+    let end: usize = app.view.rendered_u16.iter().sum();
+    let tail: String = rows[k..].concat();
+    let tail_wide = to_wide(&tail);
     unsafe {
         let mut si = ScrollInfo {
             cb_size: std::mem::size_of::<ScrollInfo>() as u32,
@@ -983,15 +1008,20 @@ fn render_transcript(app: &mut AppCtx) {
             || si.n_page == 0
             || si.n_pos + si.n_page as c_int >= si.n_max - 1;
         let first_visible = SendMessageW(hwnd, EM_GETFIRSTVISIBLELINE, 0, 0);
-        set_text(hwnd, &text);
+        SendMessageW(hwnd, EM_SETSEL, start, end as Lparam);
+        SendMessageW(hwnd, EM_REPLACESEL, 0, tail_wide.as_ptr() as Lparam);
         if at_bottom {
             let len = GetWindowTextLengthW(hwnd) as Wparam;
             SendMessageW(hwnd, EM_SETSEL, len, len as Lparam);
             SendMessageW(hwnd, EM_SCROLLCARET, 0, 0);
         } else {
-            SendMessageW(hwnd, EM_LINESCROLL, 0, first_visible);
+            // Replacing moves the caret (and view) to the edit point; scroll back.
+            let now_first = SendMessageW(hwnd, EM_GETFIRSTVISIBLELINE, 0, 0);
+            SendMessageW(hwnd, EM_LINESCROLL, 0, first_visible - now_first);
         }
     }
+    app.view.rendered_u16 = rows.iter().map(|r| r.encode_utf16().count()).collect();
+    app.view.rendered_rows = rows;
     app.view.transcript_dirty = false;
     app.view.last_render = Some(Instant::now());
 }
@@ -1121,12 +1151,23 @@ fn apply_lines(v: &mut View, new_lines: Vec<String>) {
     }
 }
 
+/// True while `pump_ui` runs: Win32 calls inside it can dispatch messages synchronously.
+static mut IN_PUMP: bool = false;
+
 fn pump_ui() {
     unsafe {
-        if MODAL_OPEN {
+        if MODAL_OPEN || IN_PUMP {
             return;
         }
+        IN_PUMP = true;
     }
+    pump_ui_inner();
+    unsafe {
+        IN_PUMP = false;
+    }
+}
+
+fn pump_ui_inner() {
     with_app(|app| {
         loop {
             match app.rx.try_recv() {
@@ -1350,8 +1391,15 @@ fn apply_theme_colors(app: &mut AppCtx) {
 unsafe extern "system" fn wnd_proc(hwnd: Hwnd, msg: u32, wp: Wparam, lp: Lparam) -> Lresult {
     match msg {
         WM_COMMAND => {
+            // Only button clicks (BN_CLICKED = 0) and menu items (code 0, lp = 0). Edit
+            // notifications (EN_CHANGE when the transcript updates, EN_SETFOCUS, …) must
+            // not run commands: EN_CHANGE → pump → transcript update → EN_CHANGE recursed
+            // until the stack overflowed.
             let id = (wp & 0xFFFF) as i32;
-            on_command(id);
+            let code = ((wp >> 16) & 0xFFFF) as u16;
+            if code == 0 {
+                on_command(id);
+            }
             0
         }
         WM_TIMER => {
@@ -1936,6 +1984,9 @@ pub fn run_windows_gui() -> i32 {
     };
     unsafe {
         ShowWindow(c.action, SW_HIDE);
+        // Default edit limit is ~32K characters (~280 lines) and applies to EM_REPLACESEL;
+        // 0 = maximum, so multi-hour transcripts keep growing in the window.
+        SendMessageW(c.transcript, EM_SETLIMITTEXT, 0, 0);
     }
 
     let font_ui = make_font(&face, -16, FW_NORMAL);
@@ -1973,6 +2024,8 @@ pub fn run_windows_gui() -> i32 {
             transcript_dirty: true,
             last_render: None,
             rendered_banner: String::new(),
+            rendered_rows: Vec::new(),
+            rendered_u16: Vec::new(),
             stopping: false,
             idle: IdlePrompt::new(0, 0),
         },
@@ -2084,6 +2137,20 @@ mod tests {
     }
 
     #[test]
+    fn only_the_changed_tail_is_rerendered() {
+        let r = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // New line appended: keep everything before it.
+        assert_eq!(first_changed_row(&r(&["a", "b"]), &r(&["a", "b", "c"])), 2);
+        // Live line changed: only the last row.
+        assert_eq!(first_changed_row(&r(&["a", "live1"]), &r(&["a", "live2"])), 1);
+        // A recent line polished: re-render from that line.
+        assert_eq!(first_changed_row(&r(&["a", "b", "c"]), &r(&["a", "B", "c"])), 1);
+        // Live line removed after it became a saved line.
+        assert_eq!(first_changed_row(&r(&["a", "live"]), &r(&["a"])), 1);
+        assert_eq!(first_changed_row(&r(&["a"]), &r(&["a"])), 1);
+    }
+
+    #[test]
     fn rgb_is_gdi_order() {
         assert_eq!(rgb(0x12, 0x34, 0x56), 0x0056_3412);
     }
@@ -2105,6 +2172,8 @@ mod tests {
             transcript_dirty: false,
             last_render: None,
             rendered_banner: String::new(),
+            rendered_rows: Vec::new(),
+            rendered_u16: Vec::new(),
             stopping: false,
             idle: IdlePrompt::new(0, 0),
         };

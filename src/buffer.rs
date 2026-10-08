@@ -3,6 +3,14 @@
 //! Handles OS rolling windows that rewrite the same sentence (draft → polished)
 //! without writing near-duplicate finals to disk/UI.
 
+/// Live Captions only rewrites lines still on screen (at most ~6): match families against
+/// this many of the latest committed lines. Shared with the transcript writer and the UI
+/// history. Older lines must not swallow a new sentence that starts the same way, and a
+/// repeated "Yeah, that makes sense." a minute later is a new line.
+pub const RECENT_FAMILY_K: usize = 8;
+/// Keep a little more than the family window; older commits are never consulted.
+const COMMITTED_KEEP: usize = RECENT_FAMILY_K * 2;
+
 /// Diffs successive caption text from the OS.
 #[derive(Clone, Debug, Default)]
 pub struct CaptionBuffer {
@@ -100,7 +108,12 @@ impl CaptionBuffer {
     }
 
     fn already_covered(&self, line: &str) -> bool {
-        self.committed.iter().any(|c| same_or_refinement(c, line))
+        self.recent_committed().iter().any(|c| same_or_refinement(c, line))
+    }
+
+    fn recent_committed(&self) -> &[String] {
+        let start = self.committed.len().saturating_sub(RECENT_FAMILY_K);
+        &self.committed[start..]
     }
 
     /// Public check: is this line (or the last segment of a surface) already finalized?
@@ -133,7 +146,8 @@ impl CaptionBuffer {
                 return CommitOutcome::None;
             }
         }
-        for c in self.committed.iter_mut() {
+        let start = self.committed.len().saturating_sub(RECENT_FAMILY_K);
+        for c in self.committed[start..].iter_mut() {
             if same_or_refinement(c, line) {
                 // Leaving the window / session end: LC has settled, so a version that keeps
                 // every word and adds more wins over an early full stop ("Third sentence."
@@ -148,6 +162,10 @@ impl CaptionBuffer {
             }
         }
         self.committed.push(line.to_string());
+        if self.committed.len() > COMMITTED_KEEP {
+            let excess = self.committed.len() - COMMITTED_KEEP;
+            self.committed.drain(..excess);
+        }
         CommitOutcome::New(line.to_string())
     }
 
@@ -239,6 +257,15 @@ impl CaptionBuffer {
         // (or Revised if we already committed that family). Never New-final mid-growth.
         if let Some(prev_last) = prev_lines.last() {
             if same_or_refinement(prev_last, &last) && last != *prev_last {
+                // Only an already-committed family may be revised here. Committing a NEW
+                // line mid-growth without emitting it lost short lines that never changed
+                // again ("Yeah, that makes sense."); new lines commit on settle / leave.
+                if !self.already_covered(&last) {
+                    if revised.is_empty() && finals.is_empty() {
+                        return BufferEmit::Partial(last);
+                    }
+                    return emit_from_parts(revised, finals, Some(last));
+                }
                 match self.try_commit(&last, false) {
                     CommitOutcome::Revised(t) => {
                         push_unique_family(&mut revised, t);
@@ -1472,11 +1499,14 @@ mod tests {
         if matches!(e1, BufferEmit::Final(_)) {
             n += 1;
         }
-        match b.observe(polished) {
-            BufferEmit::Final(_) | BufferEmit::Finals(_) => n += 1,
-            _ => {}
+        // Polished text settles on the next poll and is emitted (never committed silently).
+        for _ in 0..2 {
+            match b.observe(polished) {
+                BufferEmit::Final(_) | BufferEmit::Finals(_) => n += 1,
+                _ => {}
+            }
         }
-        assert!(n <= 1, "duplicate finals n={n}");
+        assert_eq!(n, 1, "exactly one final for the family");
         assert_eq!(
             b.committed
                 .iter()
@@ -2107,3 +2137,126 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod long_session_probe {
+    use super::*;
+    use std::time::Instant;
+
+    const VOCAB: &[&str] = &["budget","launch","hiring","testing","customers","pricing","roadmap","support",
+        "design","contract","invoice","server","meeting","report","partner","feature","schedule","training",
+        "migration","security","marketing","quarter","office","travel","survey","dashboard","onboarding",
+        "warehouse","shipping","refund","forecast","pipeline","license","renewal","workshop","prototype"];
+    const FRAMES: &[&str] = &["We need to sort out the {} before the {}.", "Can you send me the {} numbers by {}?",
+        "I think the {} is blocking the {}.", "Let's park the {} and come back to the {}.",
+        "The {} went well, but the {} needs work.", "Who owns the {} now that the {} has moved?",
+        "So the plan is {} first, then {}.", "Honestly the {} matters more than the {}."];
+
+    fn sentence(i: usize, seed: &mut u64) -> String {
+        if i % 15 == 7 { return "Yeah, that makes sense.".into(); }
+        let mut r = || { *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407); (*seed >> 33) as usize };
+        if r() % 4 == 0 {
+            // Common openers recur all meeting ("I think the …", "Can you send me …").
+            let f = FRAMES[r() % FRAMES.len()];
+            let a = VOCAB[r() % VOCAB.len()];
+            let b = VOCAB[r() % VOCAB.len()];
+            return f.replacen("{}", a, 1).replacen("{}", b, 1);
+        }
+        let len = 7 + r() % 6;
+        let mut words: Vec<String> = (0..len).map(|_| VOCAB[r() % VOCAB.len()].to_string()).collect();
+        words[0] = format!("{}{}", words[0][..1].to_uppercase(), &words[0][1..]);
+        format!("{}.", words.join(" "))
+    }
+
+    /// Long-meeting regression check: ~2 h of simulated Live Captions (rolling 3-line
+    /// surface, words arriving one by one) through the buffer AND the transcript writer.
+    /// `cargo test --release --lib two_hour_meeting -- --ignored --nocapture`
+    /// Watch for: loss rate flat across hours, repeated short lines saved, flat µs/step.
+    #[test]
+    #[ignore]
+    fn two_hour_meeting() {
+        let mut seed = 42u64;
+        let mut b = CaptionBuffer::new();
+        let mut saved: Vec<String> = Vec::new();
+        let mut spoken: Vec<String> = Vec::new();
+        let mut window: Vec<String> = Vec::new();
+        let n = 2400; // ~20 lines/min for 2 h
+        let dir = std::env::temp_dir().join(format!("interpres-2h-{}", std::process::id()));
+        let mut w = crate::transcript::TranscriptWriter::begin_session(
+            &dir, true, false, "sim", std::time::SystemTime::now()).unwrap().unwrap();
+
+        let (mut first, mut last) = (0u128, 0u128);
+        for i in 0..n {
+            let s = sentence(i, &mut seed);
+            spoken.push(s.clone());
+            let words: Vec<&str> = s.split_whitespace().collect();
+            let t0 = Instant::now();
+            for k in 1..=words.len() {
+                let mut surf = window.clone();
+                surf.push(words[..k].join(" "));
+                let surface = surf.join("\n");
+                for _ in 0..2 {
+                    let e = b.observe(&surface);
+                    write_through(&e, &mut w);
+                    collect(e, &mut saved);
+                }
+            }
+            let dt = t0.elapsed().as_micros() / words.len() as u128;
+            if i < 200 { first += dt; }
+            if i >= n - 200 { last += dt; }
+            window.push(s);
+            if window.len() > 3 { window.remove(0); }
+        }
+        let e = b.finish();
+        write_through(&e, &mut w);
+        collect(e, &mut saved);
+        let file = std::fs::read_to_string(w.txt_path()).unwrap();
+        let file_lines: Vec<String> = file.lines().filter(|l| l.starts_with('['))
+            .map(|l| l[l.find(']').unwrap() + 1..].trim().to_string()).collect();
+        let file_yeah = file_lines.iter().filter(|l| l.starts_with("Yeah")).count();
+        let file_missing = spoken.iter().filter(|s| !s.starts_with("Yeah") && !file_lines.contains(s)).count();
+        let mut dup = 0;
+        for i in 1..file_lines.len() { if file_lines[i] == file_lines[i - 1] { dup += 1; } }
+        println!("FILE: caption lines={} yeah={} other_missing={} adjacent_duplicates={} bytes={}",
+            file_lines.len(), file_yeah, file_missing, dup, file.len());
+        let _ = std::fs::remove_dir_all(&dir);
+        let yeah = |s: &String| s.starts_with("Yeah");
+        let yeah_spoken = spoken.iter().filter(|s| yeah(s)).count();
+        let yeah_saved = saved.iter().filter(|s| yeah(s)).count();
+        let other: Vec<&String> = spoken.iter().filter(|s| !yeah(s)).collect();
+        let missing: Vec<usize> = spoken.iter().enumerate()
+            .filter(|(_, s)| !yeah(s) && !saved.iter().any(|x| x == *s))
+            .map(|(i, _)| i).collect();
+        let miss_first_half = missing.iter().filter(|&&i| i < n / 2).count();
+        println!("spoken={} saved_events={} committed_kept={}", spoken.len(), saved.len(), b.committed.len());
+        println!("'Yeah, that makes sense.' spoken={yeah_spoken} saved={yeah_saved}");
+        println!("other lines={} missing={} (first hour {}, second hour {})",
+            other.len(), missing.len(), miss_first_half, missing.len() - miss_first_half);
+        for &i in missing.iter().take(4) { println!("  missing #{i}: {}", spoken[i]); }
+        println!("avg µs per word-step: first 200 lines={} last 200 lines={}", first / 200, last / 200);
+    }
+
+    fn write_through(e: &BufferEmit, w: &mut crate::transcript::TranscriptWriter) {
+        let c = "00:00:00";
+        match e {
+            BufferEmit::Final(t) => { let _ = w.write_final(c, t); }
+            BufferEmit::Revised(t) => { let _ = w.write_revised(c, t); }
+            BufferEmit::Finals(v) => { for t in v { let _ = w.write_final(c, t); } }
+            BufferEmit::Batch { revised, finals } => {
+                for t in revised { let _ = w.write_revised(c, t); }
+                for t in finals { let _ = w.write_final(c, t); }
+            }
+            _ => {}
+        }
+    }
+
+    fn collect(e: BufferEmit, out: &mut Vec<String>) {
+        match e {
+            BufferEmit::Final(t) | BufferEmit::Revised(t) => out.push(t),
+            BufferEmit::Finals(v) => out.extend(v),
+            BufferEmit::Batch { revised, finals } => { out.extend(revised); out.extend(finals); }
+            _ => {}
+        }
+    }
+}
+

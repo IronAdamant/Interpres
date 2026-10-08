@@ -5,7 +5,7 @@
 use crate::buffer::{prefer_polish, same_or_refinement};
 
 /// Default scan depth for same-family matches (matches transcript ring K).
-pub const HISTORY_FAMILY_K: usize = 24;
+pub const HISTORY_FAMILY_K: usize = crate::buffer::RECENT_FAMILY_K;
 
 /// Apply a new Final caption to the in-memory Session history list.
 /// Returns (new_history, body_of_last_nonempty_row).

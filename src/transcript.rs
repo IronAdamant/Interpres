@@ -8,8 +8,9 @@ use std::time::SystemTime;
 use crate::buffer::{prefer_polish, same_or_refinement};
 use crate::session::{format_session_stamp, unique_session_stem};
 
-/// Scan this many trailing caption lines for same-family rewrite.
-const FAMILY_RING_K: usize = 24;
+/// Scan this many trailing caption lines for same-family rewrite (same window as the
+/// caption buffer: a repeat further back is a new line, not a polish).
+const FAMILY_RING_K: usize = crate::buffer::RECENT_FAMILY_K;
 
 /// Result of attempting a same-family rewrite on disk.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
