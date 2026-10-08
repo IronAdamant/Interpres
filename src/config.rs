@@ -30,8 +30,13 @@ pub struct Config {
     /// UI appearance: system (follow OS), light, or dark. Does not affect capture.
     pub theme: ThemeMode,
     /// Ask "are you done?" after this many minutes with no new captions (0 = never).
-    /// Recording never stops on its own.
+    /// Recording never stops on its own (unless `auto_record` is on).
     pub idle_prompt_minutes: u64,
+    /// Start recording when sound plays through the speakers, and stop + save after
+    /// `auto_stop_quiet_minutes` of silence (Windows). Off by default.
+    pub auto_record: bool,
+    /// With `auto_record` on: stop and save after this many minutes of no sound (0 = never).
+    pub auto_stop_quiet_minutes: u64,
 }
 
 impl Default for Config {
@@ -50,6 +55,8 @@ impl Default for Config {
             debug: false,
             theme: ThemeMode::System,
             idle_prompt_minutes: 3,
+            auto_record: false,
+            auto_stop_quiet_minutes: 5,
         }
     }
 }
@@ -170,6 +177,12 @@ impl Config {
                         cfg.idle_prompt_minutes = n;
                     }
                 }
+                "auto_record" => cfg.auto_record = parse_bool(v),
+                "auto_stop_quiet_minutes" => {
+                    if let Ok(n) = v.parse() {
+                        cfg.auto_stop_quiet_minutes = n;
+                    }
+                }
                 _ => {}
             }
         }
@@ -216,6 +229,12 @@ impl Config {
         writeln!(f, "debug={}", if self.debug { "true" } else { "false" })?;
         writeln!(f, "theme={}", self.theme.as_str())?;
         writeln!(f, "idle_prompt_minutes={}", self.idle_prompt_minutes)?;
+        writeln!(
+            f,
+            "auto_record={}",
+            if self.auto_record { "true" } else { "false" }
+        )?;
+        writeln!(f, "auto_stop_quiet_minutes={}", self.auto_stop_quiet_minutes)?;
         Ok(())
     }
 }
@@ -319,6 +338,8 @@ mod tests {
         cfg.off_delay_ms = 3000;
         cfg.source = "os".into();
         cfg.theme = ThemeMode::Light;
+        cfg.auto_record = true;
+        cfg.auto_stop_quiet_minutes = 7;
         cfg.save_to(&path).expect("save");
         let loaded = Config::load_from(&path);
         assert_eq!(loaded.remember, false);
@@ -329,6 +350,9 @@ mod tests {
         assert_eq!(loaded.write_jsonl, true);
         assert_eq!(loaded.off_delay_ms, 3000);
         assert_eq!(loaded.theme, ThemeMode::Light);
+        assert!(loaded.auto_record);
+        assert_eq!(loaded.auto_stop_quiet_minutes, 7);
+        assert!(!Config::default().auto_record, "auto-record is opt-in");
         let _ = fs::remove_file(path);
     }
 }

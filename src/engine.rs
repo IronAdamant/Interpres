@@ -47,6 +47,8 @@ pub enum EngineEvent {
 
 struct EngineInner {
     stop: AtomicBool,
+    /// Written to the transcript as `# Session ended (<reason>)`.
+    stop_reason: Mutex<String>,
     remember: AtomicBool,
     folder: Mutex<PathBuf>,
 }
@@ -62,6 +64,7 @@ impl CaptureEngine {
         let (tx, rx) = mpsc::channel();
         let inner = Arc::new(EngineInner {
             stop: AtomicBool::new(true),
+            stop_reason: Mutex::new("user".into()),
             remember: AtomicBool::new(cfg.remember),
             folder: Mutex::new(cfg.transcript_folder.clone()),
         });
@@ -117,6 +120,9 @@ impl CaptureEngine {
         // Stop previous if any
         self.stop();
         self.inner.stop.store(false, Ordering::SeqCst);
+        if let Ok(mut r) = self.inner.stop_reason.lock() {
+            *r = "user".into();
+        }
         let inner = self.inner.clone();
         let tx = self.tx.clone();
         // Order: Listening(true) first so UI clears Session/Live before new finals arrive.
@@ -158,6 +164,23 @@ impl CaptureEngine {
     /// The thread drains the last caption, saves, then sends `Listening(false)`.
     pub fn request_stop(&self) {
         self.inner.stop.store(true, Ordering::SeqCst);
+    }
+
+    /// `request_stop`, recording why in the transcript (e.g. "no sound for 5 min").
+    pub fn request_stop_because(&self, reason: &str) {
+        if let Ok(mut r) = self.inner.stop_reason.lock() {
+            *r = reason.to_string();
+        }
+        self.request_stop();
+    }
+}
+
+impl EngineInner {
+    fn stop_reason(&self) -> String {
+        self.stop_reason
+            .lock()
+            .map(|r| r.clone())
+            .unwrap_or_else(|_| "user".into())
     }
 }
 
@@ -469,7 +492,7 @@ fn run_loop(inner: Arc<EngineInner>, tx: Sender<EngineEvent>) {
     }
     flush_buffer(&mut buffer, &mut writer, &tx);
     if let Some(ref mut w) = writer {
-        let _ = w.end_session("user");
+        let _ = w.end_session(&inner.stop_reason());
     }
     crate::debuglog::set_session_stem(None);
     platform::shutdown_capture();
@@ -591,7 +614,7 @@ fn run_external_engine(inner: &EngineInner, tx: &Sender<EngineEvent>, cfg: &Conf
         crate::debuglog::log("engine stopped by user");
     }
     if let Some(ref mut w) = writer {
-        let _ = w.end_session("user");
+        let _ = w.end_session(&inner.stop_reason());
     }
     crate::debuglog::set_session_stem(None);
     send_stopped(tx);

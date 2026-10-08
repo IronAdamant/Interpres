@@ -4,6 +4,7 @@
 //! frameworks + hand-written FFI / native clang objects.
 
 pub mod assets_check;
+pub mod auto_record;
 pub mod buffer;
 pub mod config;
 pub mod debuglog;

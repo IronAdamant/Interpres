@@ -1,15 +1,17 @@
 //! Windows native UI — hand-written Win32 (user32/gdi32/shell32). Zero crates.io.
 //!
-//! Layout (top → bottom): title + Settings menu, a coloured status banner driven by
+//! Layout (top → bottom): title + Auto-record checkbox + Settings menu, a coloured status banner driven by
 //! `EngineEvent::Health`, one Start/Stop button plus a contextual Live Captions
 //! button, a setup checklist, a single transcript view (saved lines + the line being
 //! spoken), and a footer with Open / Copy / Folder actions.
 
+use crate::auto_record::{AutoAction, AutoRecord, SoundDetector};
 use crate::buffer::same_or_refinement;
 use crate::config::Config;
 use crate::engine::{CaptureEngine, EngineEvent};
 use crate::health::{Health, IdlePrompt};
 use crate::platform;
+use crate::platform::windows_audio::{spawn_sound_meter, SoundLevel};
 use crate::theme::{palette_for_dark, ThemeMode};
 use crate::transcript::format_clock;
 use crate::ui_labels::LAG_TIP;
@@ -17,6 +19,7 @@ use std::os::raw::{c_int, c_void};
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::mpsc::{Receiver, TryRecvError};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -66,6 +69,7 @@ const WS_EX_CLIENTEDGE: u32 = 0x0200;
 const SW_HIDE: c_int = 0;
 const SW_SHOWNORMAL: c_int = 1;
 const SW_SHOW: c_int = 5;
+const SW_SHOWMINNOACTIVE: c_int = 7;
 const CW_USEDEFAULT: c_int = 0x8000_0000_u32 as c_int;
 const IDI_APPLICATION: usize = 32512;
 const IDC_ARROW: usize = 32512;
@@ -86,6 +90,7 @@ const DT_CENTER: u32 = 0x0001;
 const DT_VCENTER: u32 = 0x0004;
 const DT_SINGLELINE: u32 = 0x0020;
 const DT_NOPREFIX: u32 = 0x0800;
+const DT_LEFT: u32 = 0x0000;
 const PS_SOLID: c_int = 0;
 const TRANSPARENT: c_int = 1;
 
@@ -117,6 +122,14 @@ const DWMWA_USE_IMMERSIVE_DARK_MODE: u32 = 20;
 const HKEY_CURRENT_USER: *mut c_void = 0x8000_0001u32 as usize as *mut c_void;
 const KEY_READ: u32 = 0x20019;
 const REG_DWORD: u32 = 4;
+const REG_SZ: u32 = 1;
+const KEY_SET_VALUE: u32 = 0x0002;
+const ERROR_FILE_NOT_FOUND: i32 = 2;
+/// Per-user startup list (no admin needed).
+const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+const RUN_VALUE: &str = "Interpres";
+/// Command-line flag used by the startup entry: open minimized, don't steal focus.
+const MINIMIZED_ARG: &str = "--minimized";
 
 const FW_NORMAL: c_int = 400;
 const FW_SEMIBOLD: c_int = 600;
@@ -130,6 +143,10 @@ const PUMP_MS: u32 = 50;
 const TRANSCRIPT_MIN_INTERVAL: Duration = Duration::from_millis(200);
 /// While stopped, re-check whether Live Captions is on this often.
 const IDLE_LC_CHECK: Duration = Duration::from_secs(2);
+/// Speaker level older than this is treated as unknown (never as silence).
+const SOUND_STALE: Duration = Duration::from_secs(3);
+/// Auto-record turned Live Captions on: wait this long for it before recording anyway.
+const AUTO_LC_WAIT: Duration = Duration::from_secs(15);
 
 // Controls
 const IDC_TITLE: i32 = 1001;
@@ -146,6 +163,7 @@ const IDC_FILE: i32 = 1011;
 const IDC_OPEN_FILE: i32 = 1012;
 const IDC_COPY: i32 = 1013;
 const IDC_OPEN_FOLDER: i32 = 1014;
+const IDC_AUTO: i32 = 1015;
 
 // Settings menu
 const IDM_SAVE: i32 = 2001;
@@ -160,6 +178,7 @@ const IDM_RESTART_LC: i32 = 2009;
 const IDM_SOURCE_LC: i32 = 2010;
 const IDM_SOURCE_ENGINE: i32 = 2011;
 const IDM_EDIT_SETTINGS: i32 = 2012;
+const IDM_START_WITH_WINDOWS: i32 = 2013;
 
 #[repr(C)]
 struct WndClassExW {
@@ -368,6 +387,15 @@ extern "system" {
         data_len: *mut u32,
     ) -> i32;
     fn RegCloseKey(key: *mut c_void) -> i32;
+    fn RegSetValueExW(
+        key: *mut c_void,
+        name: *const u16,
+        reserved: u32,
+        ty: u32,
+        data: *const u8,
+        data_len: u32,
+    ) -> i32;
+    fn RegDeleteValueW(key: *mut c_void, name: *const u16) -> i32;
 }
 
 #[link(name = "gdi32")]
@@ -489,6 +517,72 @@ fn system_apps_use_dark() -> bool {
     }
 }
 
+/// What the startup entry runs: this exe, opened minimized.
+fn startup_command() -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    Some(format!("\"{}\" gui {MINIMIZED_ARG}", exe.display()))
+}
+
+/// The startup entry's command, if Interpres is set to start with Windows.
+fn read_startup_entry() -> Option<String> {
+    unsafe {
+        let sub = to_wide(RUN_KEY);
+        let mut key: *mut c_void = ptr::null_mut();
+        if RegOpenKeyExW(HKEY_CURRENT_USER, sub.as_ptr(), 0, KEY_READ, &mut key) != 0 {
+            return None;
+        }
+        let name = to_wide(RUN_VALUE);
+        let mut ty: u32 = 0;
+        let mut buf = vec![0u16; 1024];
+        let mut len = (buf.len() * 2) as u32;
+        let ok = RegQueryValueExW(
+            key,
+            name.as_ptr(),
+            ptr::null_mut(),
+            &mut ty,
+            buf.as_mut_ptr() as *mut u8,
+            &mut len,
+        );
+        RegCloseKey(key);
+        (ok == 0 && ty == REG_SZ).then(|| from_wide(&buf))
+    }
+}
+
+/// Add or remove Interpres from the per-user startup list.
+fn set_start_with_windows(on: bool) -> bool {
+    unsafe {
+        let sub = to_wide(RUN_KEY);
+        let mut key: *mut c_void = ptr::null_mut();
+        if RegOpenKeyExW(HKEY_CURRENT_USER, sub.as_ptr(), 0, KEY_SET_VALUE, &mut key) != 0 {
+            return false;
+        }
+        let name = to_wide(RUN_VALUE);
+        let res = if on {
+            match startup_command() {
+                Some(cmd) => {
+                    let data = to_wide(&cmd);
+                    RegSetValueExW(
+                        key,
+                        name.as_ptr(),
+                        0,
+                        REG_SZ,
+                        data.as_ptr() as *const u8,
+                        (data.len() * 2) as u32,
+                    )
+                }
+                None => -1,
+            }
+        } else {
+            match RegDeleteValueW(key, name.as_ptr()) {
+                ERROR_FILE_NOT_FOUND => 0,
+                r => r,
+            }
+        };
+        RegCloseKey(key);
+        res == 0
+    }
+}
+
 fn make_font(face: &[u16], height: c_int, weight: c_int) -> Hfont {
     unsafe {
         CreateFontW(
@@ -526,6 +620,8 @@ struct Controls {
     open_file: Hwnd,
     copy: Hwnd,
     open_folder: Hwnd,
+    /// "Auto-record when sound plays" checkbox (owner-drawn).
+    auto: Hwnd,
 }
 
 /// What the contextual second button does right now.
@@ -581,6 +677,19 @@ struct AppCtx {
     engine_configured: bool,
     /// Monotonic base for `IdlePrompt` milliseconds.
     epoch: Instant,
+    /// Auto-record checkbox state (saved as `auto_record`).
+    auto_on: bool,
+    auto: AutoRecord,
+    /// Speaker level reader; running only while auto-record is on.
+    sound: Option<Arc<SoundLevel>>,
+    detector: SoundDetector,
+    /// Last speaker-meter state reported to the user (None = not yet known).
+    sound_readable: Option<bool>,
+    /// Auto-record turned Live Captions on and is waiting for it before starting.
+    auto_start_pending: Option<Instant>,
+    /// Shown once the engine confirms an automatic start/stop (those events clear the
+    /// detail line).
+    auto_note: Option<String>,
     // fonts
     font_ui: Hfont,
     font_title: Hfont,
@@ -657,11 +766,33 @@ impl AppCtx {
         }
     }
 
-    /// (headline, guidance, background colour, text colour)
     fn now_ms(&self) -> u64 {
         self.epoch.elapsed().as_millis() as u64
     }
 
+    /// While recording with auto-record on: time left before silence stops it.
+    fn auto_stop_in_ms(&self) -> Option<u64> {
+        let limit = self.auto.quiet_stop_ms();
+        if !self.auto_on || !self.view.listening || limit == 0 {
+            return None;
+        }
+        Some(limit.saturating_sub(self.quiet_ms()))
+    }
+
+    /// How long nothing has happened: no speaker sound and, while recording, no new
+    /// captions (Live Captions can caption your microphone while the speakers are silent;
+    /// "Keep recording" also resets this).
+    fn quiet_ms(&self) -> u64 {
+        let now = self.now_ms();
+        let sound = self.detector.quiet_ms(now);
+        if self.view.listening {
+            sound.min(self.view.idle.quiet_ms(now))
+        } else {
+            sound
+        }
+    }
+
+    /// (headline, guidance, background colour, text colour)
     fn banner(&self) -> (String, String, u32, u32) {
         let v = &self.view;
         if v.listening && v.stopping {
@@ -680,11 +811,36 @@ impl AppCtx {
             } else {
                 format!("No new captions for {mins} min — are you done?")
             };
+            let guidance = match self.auto_stop_in_ms() {
+                Some(left) => format!(
+                    "If it stays silent, Interpres stops and saves by itself in {} min. Or choose now.",
+                    left.div_ceil(60_000).max(1)
+                ),
+                None => {
+                    "Recording keeps going until you choose: Stop & save, or Keep recording.".into()
+                }
+            };
+            return (head, guidance, COL_ACTION, COL_WHITE);
+        }
+        if !v.listening && self.auto_on {
+            let guidance = if self.auto_start_pending.is_some() {
+                "Sound is playing — turning on Live Captions, then recording starts.".to_string()
+            } else if self.sound_readable == Some(false) {
+                "Can't read the speaker level right now, so auto-record is paused.".to_string()
+            } else if self.engine_mode {
+                format!(
+                    "Recording starts by itself when a meeting or video plays. Captions from {}.",
+                    self.engine_name
+                )
+            } else {
+                "Recording starts by itself when a meeting or video plays (Live Captions turns on too)."
+                    .to_string()
+            };
             return (
-                head,
-                "Recording keeps going until you choose: Stop & save, or Keep recording.".into(),
-                COL_ACTION,
-                COL_WHITE,
+                "Not recording — auto-record is on".into(),
+                guidance,
+                self.col_panel,
+                self.col_text,
             );
         }
         if !v.listening && self.engine_mode {
@@ -1119,10 +1275,15 @@ fn apply_event(app: &mut AppCtx, ev: EngineEvent) {
                 v.times.clear();
                 v.detail.clear();
                 v.session_path = None;
+                app.auto_start_pending = None;
             } else {
                 v.started_at = None;
                 v.last_idle_check = None;
                 v.detail.clear();
+                app.auto.on_stopped();
+            }
+            if let Some(note) = app.auto_note.take() {
+                v.detail = note;
             }
             v.transcript_dirty = true;
         }
@@ -1175,6 +1336,7 @@ fn pump_ui_inner() {
                 Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
             }
         }
+        tick_auto_record(app);
         let now_ms = app.now_ms();
         let problem = app.view.health.is_some_and(|h| h.is_problem());
         if app.view.listening && !app.view.stopping && !problem && app.view.idle.tick(now_ms) {
@@ -1201,6 +1363,82 @@ fn pump_ui_inner() {
         }
         refresh_static_ui(app);
     });
+}
+
+/// Auto-record: feed the speaker level, then start or stop recording as needed.
+fn tick_auto_record(app: &mut AppCtx) {
+    let Some(sound) = app.sound.clone() else {
+        return;
+    };
+    let now = app.now_ms();
+    let readable = sound.healthy(SOUND_STALE);
+    if readable {
+        app.detector.sample(now, sound.take_peak());
+    } else {
+        // Unknown is not silence: never stop a recording on a broken meter.
+        app.detector.assume_sound(now);
+    }
+    if (readable || sound.age() >= SOUND_STALE) && app.sound_readable != Some(readable) {
+        app.sound_readable = Some(readable);
+        crate::debuglog::log(&format!("auto-record: speaker level readable={readable}"));
+        if !readable {
+            app.view.detail =
+                "⚠  Can't read the speaker level — auto-record won't start or stop by itself.".into();
+        }
+    }
+    if app.view.stopping {
+        return;
+    }
+    if let Some(since) = app.auto_start_pending {
+        if app.view.listening {
+            app.auto_start_pending = None;
+        } else if app.view.idle_lc_on == Some(true) || since.elapsed() >= AUTO_LC_WAIT {
+            app.auto_start_pending = None;
+            auto_start(app);
+        }
+        return;
+    }
+    let playing = readable && app.detector.playing(now);
+    let quiet = app.quiet_ms();
+    match app.auto.tick(app.view.listening, playing, quiet) {
+        AutoAction::None => {}
+        AutoAction::Start => {
+            refresh_source(app);
+            let lc_off = !app.engine_mode
+                && app.view.idle_lc_on != Some(true)
+                && !platform::live_captions_present().running;
+            if lc_off {
+                // Start once Live Captions is up, so the banner doesn't flash "off".
+                crate::debuglog::log("auto-record: sound playing — turning on Live Captions");
+                app.auto_start_pending = Some(Instant::now());
+                app.view.idle_lc_on = Some(false);
+                app.view.last_idle_check = Some(Instant::now());
+                thread::spawn(|| {
+                    if let Err(e) = platform::windows::launch_live_captions() {
+                        crate::debuglog::log(&format!("auto-record: Live Captions launch failed: {e}"));
+                    }
+                });
+            } else {
+                auto_start(app);
+            }
+        }
+        AutoAction::Stop => {
+            let mins = app.auto.quiet_stop_ms() / 60_000;
+            crate::debuglog::log(&format!("auto-record: no sound for {mins} min — stop and save"));
+            app.view.stopping = true;
+            app.engine.request_stop_because(&format!("no sound for {mins} min"));
+            app.auto_note = Some(format!(
+                "Stopped and saved after {mins} min with no sound. Recording starts again when sound plays."
+            ));
+        }
+    }
+}
+
+fn auto_start(app: &mut AppCtx) {
+    crate::debuglog::log("auto-record: sound playing — start recording");
+    refresh_source(app);
+    app.auto_note = Some("Sound is playing — recording started automatically.".into());
+    app.engine.start();
 }
 
 fn child(
@@ -1256,6 +1494,7 @@ fn layout(app: &mut AppCtx) {
 
     mv(c.title, m, 14, 300, 36);
     mv(c.settings, w - m - 140, 16, 140, 34);
+    mv(c.auto, w - m - 140 - 16 - 260, 16, 260, 34);
 
     let banner = Rect {
         left: m,
@@ -1298,6 +1537,10 @@ fn layout(app: &mut AppCtx) {
 /// Owner-drawn rounded button: primary (Start/Stop), action (amber) or neutral.
 fn draw_button(app: &AppCtx, dis: &DrawItemStruct) {
     let id = dis.ctl_id as i32;
+    if id == IDC_AUTO {
+        draw_checkbox(app, dis, app.auto_on);
+        return;
+    }
     let pressed = dis.item_state & ODS_SELECTED != 0;
     let disabled = dis.item_state & ODS_DISABLED != 0;
     let (mut fill, text_col, border, font) = match id {
@@ -1348,6 +1591,58 @@ fn draw_button(app: &AppCtx, dis: &DrawItemStruct) {
                 bottom: rc.bottom - 4,
             };
             DrawFocusRect(hdc, &focus);
+        }
+    }
+}
+
+/// Owner-drawn checkbox: rounded box (green with a tick when on) and a label, in theme colours.
+fn draw_checkbox(app: &AppCtx, dis: &DrawItemStruct, checked: bool) {
+    let rc = dis.rc_item;
+    let size = 20;
+    let top = rc.top + (rc.bottom - rc.top - size) / 2;
+    let bx = Rect {
+        left: rc.left + 2,
+        top,
+        right: rc.left + 2 + size,
+        bottom: top + size,
+    };
+    unsafe {
+        let hdc = dis.hdc;
+        FillRect(hdc, &rc, app.brush_bg);
+        let (fill, border) = if checked {
+            (COL_RECORDING, COL_RECORDING)
+        } else {
+            (app.col_panel, app.col_muted)
+        };
+        let brush = CreateSolidBrush(fill);
+        let pen = CreatePen(PS_SOLID, 1, border);
+        let old_brush = SelectObject(hdc, brush);
+        let old_pen = SelectObject(hdc, pen);
+        RoundRect(hdc, bx.left, bx.top, bx.right, bx.bottom, 6, 6);
+        SelectObject(hdc, old_brush);
+        SelectObject(hdc, old_pen);
+        DeleteObject(brush);
+        DeleteObject(pen);
+
+        SetBkMode(hdc, TRANSPARENT);
+        let old_font = SelectObject(hdc, app.font_button);
+        if checked {
+            let tick = to_wide("✓");
+            let mut r = bx;
+            SetTextColor(hdc, COL_WHITE);
+            DrawTextW(hdc, tick.as_ptr(), -1, &mut r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        }
+        SelectObject(hdc, app.font_ui);
+        let label = to_wide(&get_text(dis.hwnd_item));
+        let mut lr = Rect {
+            left: bx.right + 8,
+            ..rc
+        };
+        SetTextColor(hdc, app.col_text);
+        DrawTextW(hdc, label.as_ptr(), -1, &mut lr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        SelectObject(hdc, old_font);
+        if dis.item_state & ODS_FOCUS != 0 {
+            DrawFocusRect(hdc, &rc);
         }
     }
 }
@@ -1471,7 +1766,15 @@ unsafe extern "system" fn wnd_proc(hwnd: Hwnd, msg: u32, wp: Wparam, lp: Lparam)
         }
         WM_CLOSE => {
             KillTimer(hwnd, IDT_PUMP);
-            with_app(|app| app.engine.stop());
+            // Disappear at once; saving the last sentence can take a couple of seconds.
+            ShowWindow(hwnd, SW_HIDE);
+            with_app(|app| {
+                if let Some(s) = app.sound.take() {
+                    s.stop();
+                }
+                app.engine.request_stop_because("window closed");
+                app.engine.stop();
+            });
             platform::shutdown_capture();
             DestroyWindow(hwnd);
             0
@@ -1508,6 +1811,38 @@ fn on_command(id: i32) {
             run_lc_action(action);
         }
         IDM_RESTART_LC => run_lc_action(LcAction::Restart),
+        IDC_AUTO => {
+            with_app(|app| {
+                app.auto_on = !app.auto_on;
+                let mut cfg = Config::load();
+                cfg.auto_record = app.auto_on;
+                let _ = cfg.save();
+                if let Some(s) = app.sound.take() {
+                    s.stop();
+                }
+                app.auto_start_pending = None;
+                app.sound_readable = None;
+                if app.auto_on {
+                    let quiet_min = cfg.auto_stop_quiet_minutes;
+                    app.auto = AutoRecord::new(quiet_min.saturating_mul(60_000));
+                    app.detector = SoundDetector::new(app.now_ms());
+                    app.sound = Some(spawn_sound_meter());
+                    app.view.detail = if quiet_min > 0 {
+                        format!(
+                            "Auto-record ON — starts when sound plays, stops and saves after {quiet_min} min of silence."
+                        )
+                    } else {
+                        "Auto-record ON — starts when sound plays.".into()
+                    };
+                } else {
+                    app.view.detail = "Auto-record OFF — press Start recording yourself.".into();
+                }
+                crate::debuglog::log(&format!("ui auto-record {}", if app.auto_on { "on" } else { "off" }));
+                unsafe {
+                    InvalidateRect(app.c.auto, ptr::null(), 1);
+                }
+            });
+        }
         IDC_SETTINGS => show_settings_menu(),
         IDC_OPEN_FILE => {
             if let Some((owner, Some(p))) = with_app(|app| (app.c.main, app.view.session_path.clone())) {
@@ -1616,6 +1951,18 @@ fn on_command(id: i32) {
                 app.view.last_idle_check = None;
             });
         }
+        IDM_START_WITH_WINDOWS => {
+            let on = read_startup_entry().is_none();
+            let ok = set_start_with_windows(on);
+            crate::debuglog::log(&format!("ui start with Windows on={on} ok={ok}"));
+            with_app(|app| {
+                app.view.detail = match (ok, on) {
+                    (true, true) => "Interpres will start (minimized) when you sign in to Windows, so auto-record is always ready.".into(),
+                    (true, false) => "Interpres will no longer start with Windows.".into(),
+                    (false, _) => "⚠  Could not change the Windows startup setting.".into(),
+                };
+            });
+        }
         IDM_EDIT_SETTINGS => {
             let path = crate::config::config_path();
             if !path.exists() {
@@ -1675,6 +2022,8 @@ fn refresh_source(app: &mut AppCtx) {
     app.engine_name = cfg.engine_name();
     app.engine_configured = cfg.helper_path.is_some();
     app.idle_prompt_ms = cfg.idle_prompt_minutes.saturating_mul(60_000);
+    app.auto
+        .set_quiet_stop_ms(cfg.auto_stop_quiet_minutes.saturating_mul(60_000));
 }
 
 fn run_setup_check() {
@@ -1740,6 +2089,11 @@ fn show_settings_menu() {
             MF_STRING | check(engine_mode) | if engine_configured { 0 } else { MF_GRAYED },
             IDM_SOURCE_ENGINE,
             &engine_label,
+        );
+        add(
+            MF_STRING | check(read_startup_entry().is_some()),
+            IDM_START_WITH_WINDOWS,
+            "Start Interpres when Windows starts (keeps auto-record ready)",
         );
         add(MF_STRING, IDM_EDIT_SETTINGS, "Edit settings file…");
         AppendMenuW(menu, MF_SEPARATOR, 0, ptr::null());
@@ -1897,6 +2251,12 @@ pub fn run_windows_gui() -> i32 {
     crate::debuglog::init_from_config(cfg.debug, &cfg.transcript_folder);
     crate::debuglog::log("gui open (windows)");
 
+    let start_minimized = std::env::args().any(|a| a == MINIMIZED_ARG);
+    // Portable app: if the folder moved, point the startup entry at this exe.
+    if read_startup_entry().is_some_and(|cmd| Some(cmd) != startup_command()) {
+        set_start_with_windows(true);
+    }
+
     let (engine, rx) = CaptureEngine::new(&cfg);
     let remember0 = engine.remember();
 
@@ -1981,6 +2341,7 @@ pub fn run_windows_gui() -> i32 {
         open_file: child("BUTTON", "Open transcript", btn, 0, main, IDC_OPEN_FILE, instance),
         copy: child("BUTTON", "Copy all", btn, 0, main, IDC_COPY, instance),
         open_folder: child("BUTTON", "Open folder", btn, 0, main, IDC_OPEN_FOLDER, instance),
+        auto: child("BUTTON", "Auto-record when sound plays", btn, 0, main, IDC_AUTO, instance),
     };
     unsafe {
         ShowWindow(c.action, SW_HIDE);
@@ -2037,6 +2398,13 @@ pub fn run_windows_gui() -> i32 {
         engine_name: cfg.engine_name(),
         engine_configured: cfg.helper_path.is_some(),
         epoch: Instant::now(),
+        auto_on: cfg.auto_record,
+        auto: AutoRecord::new(cfg.auto_stop_quiet_minutes.saturating_mul(60_000)),
+        sound: cfg.auto_record.then(spawn_sound_meter),
+        detector: SoundDetector::new(0),
+        sound_readable: None,
+        auto_start_pending: None,
+        auto_note: None,
         font_ui,
         font_title,
         font_banner,
@@ -2066,7 +2434,7 @@ pub fn run_windows_gui() -> i32 {
     pump_ui();
     unsafe {
         SetTimer(main, IDT_PUMP, PUMP_MS, ptr::null());
-        ShowWindow(main, SW_SHOW);
+        ShowWindow(main, if start_minimized { SW_SHOWMINNOACTIVE } else { SW_SHOW });
         UpdateWindow(main);
         SetFocus(main);
     }
@@ -2148,6 +2516,24 @@ mod tests {
         // Live line removed after it became a saved line.
         assert_eq!(first_changed_row(&r(&["a", "live"]), &r(&["a"])), 1);
         assert_eq!(first_changed_row(&r(&["a"]), &r(&["a"])), 1);
+    }
+
+    /// Writes the real per-user startup entry, then restores it:
+    /// `cargo test start_with_windows_roundtrip -- --ignored`.
+    #[test]
+    #[ignore]
+    fn start_with_windows_roundtrip() {
+        let before = read_startup_entry();
+        assert!(set_start_with_windows(true));
+        let cmd = read_startup_entry().expect("entry written");
+        assert_eq!(Some(cmd.clone()), startup_command());
+        assert!(cmd.starts_with('"') && cmd.ends_with(" gui --minimized"), "{cmd}");
+        assert!(set_start_with_windows(false));
+        assert_eq!(read_startup_entry(), None);
+        assert!(set_start_with_windows(false), "removing twice is fine");
+        if before.is_some() {
+            set_start_with_windows(true);
+        }
     }
 
     #[test]

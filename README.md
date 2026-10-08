@@ -38,6 +38,25 @@ No account. No cloud. Everything stays on your computer unless **you** move the 
 
 Then use **Open transcript** or **Copy all** to move the text into your notes.
 
+Closing the window with **X** also saves: the last sentence is written and the file is closed before Interpres exits.
+
+---
+
+## Auto-record (never forget to press Start)
+
+Tick **Auto-record when sound plays** (top right). Leave Interpres open and:
+
+- When a meeting or video plays through your speakers or headset for a few seconds, Interpres **turns on Live Captions** (if it is off) and **starts recording**.
+- When it goes quiet, the usual **“are you done?”** question still appears, and tells you how long until it stops by itself.
+- After **5 minutes with no sound and no new captions**, it **stops and saves** the transcript to your transcripts folder. The file ends with `# Session ended (no sound for 5 min)`.
+- The next time sound plays, a new recording starts. If you press **Stop** while a video is still playing, it waits for a minute of quiet before it auto-starts again.
+
+Auto-record only works while Interpres is open. To keep it ready, tick **Settings ▾ → Start Interpres when Windows starts**: it then opens minimized each time you sign in.
+
+If you close Interpres with **X** by accident, nothing is lost: every line is saved to the file as it arrives, and closing saves the sentence still being spoken.
+
+Interpres only checks **how loud** your speakers are (the same level the Windows volume mixer shows). It never records or keeps any audio. Change the 5 minutes with `auto_stop_quiet_minutes` in the settings file.
+
 ---
 
 ## Reading the banner
@@ -54,7 +73,7 @@ The coloured banner tells you whether your words are being saved. The window tit
 
 When the banner turns red, the taskbar button flashes and Windows plays a warning sound, so you notice even when another window is in front.
 
-**Interpres never stops recording by itself.** When it goes quiet, it asks and waits for your answer. You can change the wait (or turn the question off) with `idle_prompt_minutes` in the settings file. See [Settings file](#settings-file).
+**Interpres never stops recording by itself** unless you tick [Auto-record](#auto-record-never-forget-to-press-start). When it goes quiet, it asks and waits for your answer. You can change the wait (or turn the question off) with `idle_prompt_minutes` in the settings file. See [Settings file](#settings-file).
 
 If Live Captions closes or restarts during a meeting, recording carries on in **the same file** and a note marks the gap.
 
@@ -93,6 +112,7 @@ Times are your local time and show when each line was first heard.
 | Save transcripts to disk | On/off. When off, captions show in the window but are not kept |
 | Change / Open transcripts folder | Choose or open where files go |
 | Captions from | Windows Live Captions, or your own engine (see below) |
+| Start Interpres when Windows starts | Opens Interpres minimized when you sign in, so auto-record is always ready |
 | Edit settings file… | Opens `settings.conf` in Notepad |
 | Check Live Captions setup | Checks whether Interpres can read Live Captions right now |
 | Restart Live Captions | Closes and reopens Live Captions (fixes a frozen captions window) |
@@ -184,6 +204,8 @@ Diagnostics: `interpres diagnose` prints what Interpres can read right now. With
 | `remember` | `true` | Save transcripts to disk |
 | `transcript_folder` | Documents\Interpres Transcripts | Where files go |
 | `idle_prompt_minutes` | `3` | Ask “are you done?” after this many quiet minutes (`0` = never) |
+| `auto_record` | `false` | Start recording when sound plays; same as the **Auto-record** checkbox |
+| `auto_stop_quiet_minutes` | `5` | With auto-record on: stop and save after this many minutes with no sound (`0` = never) |
 | `debug` | `false` | Write `interpres-debug.log` and per-session `.debug.log` |
 | `theme` | `system` | `system`, `light`, or `dark` |
 | `write_jsonl` | `false` | Also write a machine-readable `.jsonl` next to each transcript |

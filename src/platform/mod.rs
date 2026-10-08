@@ -12,6 +12,9 @@ pub mod windows;
 #[cfg(windows)]
 mod windows_uia;
 
+#[cfg(windows)]
+pub mod windows_audio;
+
 pub use detect::{live_captions_present, LiveCaptionsPresence};
 pub use signals::{macos_signals, windows_signals, SignalTable};
 
