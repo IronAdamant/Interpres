@@ -93,7 +93,8 @@ if [ -f "$ROOT/assets/logo.png" ]; then
   cp "$ROOT/assets/logo.png" "$DIST/logo.png"
 fi
 
-cat > "$APP/Contents/Info.plist" << 'EOF'
+VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)"
+cat > "$APP/Contents/Info.plist" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -105,9 +106,9 @@ cat > "$APP/Contents/Info.plist" << 'EOF'
   <key>CFBundleIdentifier</key>
   <string>org.interpres.app</string>
   <key>CFBundleVersion</key>
-  <string>0.2.0</string>
+  <string>$VERSION</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.2.0</string>
+  <string>$VERSION</string>
   <key>CFBundleExecutable</key>
   <string>Interpres</string>
   <key>CFBundleIconFile</key>
@@ -175,9 +176,10 @@ ON A MAC (this computer)
   First time Mac may ask to allow the app (right-click → Open if needed).
 
   In the window:
-    1. Press “Check setup” if unsure
-    2. Press “Start listening”
-    3. Optional: “Save to disk: ON” and “Choose folder…”
+    1. Turn on Live Captions (the window has a button that opens its settings)
+    2. Press “Start recording”, or tick “Auto-record when sound plays”
+    3. Settings ▾ has the folder, save on/off, “Open Interpres at login”,
+       and “Check Live Captions setup” if captions don’t appear
 
   Also try:
     “Try demo (no Live Captions needed).command”  — sample transcript file

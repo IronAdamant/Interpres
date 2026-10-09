@@ -157,7 +157,14 @@ Press **Restart Live Captions**. Recording carries on in the same file. If it ke
 No. Interpres reads Live Captions directly through Windows UI Automation. `interpres.exe` is all you need.
 
 **Mac?**
-A macOS build exists but has not had this redesign yet. This guide covers Windows.
+Yes: macOS 13 or newer, with **Live Captions** (System Settings → Accessibility → Live Captions). The window and features are the same as on Windows, with a few differences:
+
+- macOS doesn't let other apps switch Live Captions on, so **Turn on Live Captions** opens its page in System Settings.
+- Interpres needs **Accessibility** permission to read the captions. Use **Settings ▾ → Accessibility permission…** and turn on Interpres.
+- **Auto-record** starts when an app is playing sound **and** Live Captions is showing new words. macOS can't report speaker loudness without recording audio, so Interpres doesn't measure it.
+- **Settings ▾ → Open Interpres at login** replaces "Start with Windows".
+
+To build the Mac app, run `bash packaging/make-double-click.sh`. This creates `dist/Interpres/Interpres.app`.
 
 **Linux?**
 Not supported.
@@ -191,13 +198,17 @@ The `x86_64-pc-windows-gnu` toolchain needs a MinGW with `libgcc` (for example W
 | `src/engine.rs` | Capture loop, external-engine loop, session files, end-of-recording drain |
 | `src/plugin_host.rs` | Runs an external engine and reads its protocol lines |
 | `src/buffer.rs` | Turns the rolling caption text into finished lines |
+| `src/app_view.rs` | What the window shows (banner, checklist, transcript rows, auto-record), shared by both UIs |
 | `src/gui_win.rs` | Windows UI |
+| `src/gui.rs`, `native/macos/` | macOS UI (AppKit, compiled by `build.rs` with the system clang) |
+| `src/platform/macos.rs` | Reads Mac Live Captions through Accessibility (2.5 s call timeout), in-process process lookup |
+| `src/platform/macos_audio.rs` | Mac auto-record signal: an app is playing and Live Captions is captioning |
 
 Diagnostics: `interpres diagnose` prints what Interpres can read right now. With Live Captions open, `cargo test --lib dump_live_surface -- --ignored --nocapture` dumps the raw caption text line by line.
 
 ### Settings file
 
-`%APPDATA%\Interpres\settings.conf`, `key=value` lines:
+`%APPDATA%\Interpres\settings.conf` on Windows, `~/.config/interpres/settings.conf` on Mac, `key=value` lines:
 
 | Key | Default | Meaning |
 |-----|---------|---------|

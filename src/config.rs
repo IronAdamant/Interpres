@@ -110,12 +110,21 @@ impl Config {
             l.ends_with(".py") || l.ends_with(".js") || l.ends_with(".ps1") || l.ends_with(".sh")
         });
         let path = script
-            .map(PathBuf::from)
-            .or_else(|| self.helper_path.clone())
+            .cloned()
+            .or_else(|| self.helper_path.as_ref().map(|p| p.to_string_lossy().into_owned()))
             .unwrap_or_default();
-        path.file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "engine".into())
+        // Split on both separators: a settings file written on Windows still names
+        // the engine correctly on a Mac (and the other way round).
+        let file = path.rsplit(['/', '\\']).next().unwrap_or("");
+        let stem = match file.rfind('.') {
+            Some(i) if i > 0 => &file[..i],
+            _ => file,
+        };
+        if stem.is_empty() {
+            "engine".into()
+        } else {
+            stem.to_string()
+        }
     }
 
     pub fn load() -> Self {
@@ -193,8 +202,9 @@ impl Config {
     /// Early builds saved their defaults into the file, and every save rewrites every
     /// key, so those values stuck. Replace exactly those old defaults with today's.
     fn migrate_old_defaults(&mut self) {
-        // poll_ms default was 400 until 2026-08-07 (now 150: short lines leave quickly).
-        if self.poll_ms == 400 {
+        // poll_ms default was 1000 in the first v0.2 builds, then 400 until 2026-08-07
+        // (now 150: short lines leave quickly). A Mac field run on 1000 read once a second.
+        if self.poll_ms == 400 || self.poll_ms == 1000 {
             self.poll_ms = Config::default().poll_ms;
         }
         // off_delay_ms default was 2500 until 2026-08-06 (now 3500: LC detection blips).
@@ -309,6 +319,8 @@ mod tests {
         fs::write(&path, "poll_ms=400\noff_delay_ms=2500\n").unwrap();
         let cfg = Config::load_from(&path);
         assert_eq!(cfg.poll_ms, Config::default().poll_ms);
+        fs::write(&path, "poll_ms=1000\n").unwrap();
+        assert_eq!(Config::load_from(&path).poll_ms, Config::default().poll_ms);
         assert_eq!(cfg.off_delay_ms, Config::default().off_delay_ms);
         // A value the user picked on purpose is kept.
         fs::write(&path, "poll_ms=250\noff_delay_ms=5000\n").unwrap();

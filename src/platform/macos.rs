@@ -62,10 +62,8 @@ extern "C" {
         attribute: *const c_void,
         value: *mut *const c_void,
     ) -> c_int;
-    fn AXUIElementCopyAttributeNames(
-        element: *const c_void,
-        names: *mut *const c_void,
-    ) -> c_int;
+    fn AXUIElementSetMessagingTimeout(element: *const c_void, timeout_secs: f32) -> c_int;
+    fn AXUIElementCreateSystemWide() -> *const c_void;
 }
 
 const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
@@ -128,100 +126,187 @@ fn ax_copy(element: *const c_void, attr: &str) -> Option<*const c_void> {
     Some(value)
 }
 
-fn push_text(s: String, out: &mut Vec<String>) {
-    let t = s.trim().to_string();
-    if crate::buffer::is_junk_line(&t) {
-        return;
-    }
-    out.push(t);
+/// Live Captions marks each caption line with this subrole (macOS 15+: an
+/// `AXStaticText` inside the "Captions" list of the `AXLiveCaptionsWindow`).
+const CAPTION_SUBROLE: &str = "AXCaptionsText";
+
+fn ax_string(element: *const c_void, attr: &str) -> Option<String> {
+    let v = ax_copy(element, attr)?;
+    let s = cfstring_to_rust(v);
+    unsafe { CFRelease(v) };
+    s
 }
 
-fn collect_strings(element: *const c_void, depth: u32, out: &mut Vec<String>) {
-    if element.is_null() || depth > 16 {
+/// Static texts under `element`, in screen order. `captions_only` keeps just the
+/// caption lines; otherwise any static text (older layouts), minus window chrome.
+fn collect_texts(element: *const c_void, depth: u32, captions_only: bool, out: &mut Vec<String>) {
+    if element.is_null() || depth > 14 {
         return;
     }
-    for attr in [
-        "AXValue",
-        "AXTitle",
-        "AXDescription",
-        "AXLabel",
-        "AXHelp",
-        "AXSelectedText",
-    ] {
-        if let Some(v) = ax_copy(element, attr) {
-            if let Some(s) = cfstring_to_rust(v) {
-                push_text(s, out);
-            }
-            unsafe { CFRelease(v) };
-        }
+    let role = ax_string(element, "AXRole").unwrap_or_default();
+    // Buttons ("Pause Live Captions"), menus and their items are never captions.
+    if matches!(role.as_str(), "AXButton" | "AXMenuBar" | "AXMenu" | "AXMenuItem" | "AXMenuButton") {
+        return;
     }
-
-    // Some UIs expose text only via attribute names walk
-    if depth <= 2 {
-        let mut names: *const c_void = ptr::null();
-        let err = unsafe { AXUIElementCopyAttributeNames(element, &mut names) };
-        if err == K_AX_ERROR_SUCCESS && !names.is_null() {
-            unsafe {
-                let n = CFArrayGetCount(names);
-                for i in 0..n.min(30) {
-                    let name_cf = CFArrayGetValueAtIndex(names, i);
-                    if let Some(name) = cfstring_to_rust(name_cf) {
-                        if name.contains("Value")
-                            || name.contains("Title")
-                            || name.contains("Description")
-                            || name.contains("Caption")
-                            || name.contains("Text")
-                        {
-                            if let Some(v) = ax_copy(element, &name) {
-                                if let Some(s) = cfstring_to_rust(v) {
-                                    push_text(s, out);
-                                }
-                                CFRelease(v);
-                            }
-                        }
+    if role == "AXStaticText" {
+        let is_caption = ax_string(element, "AXSubrole").as_deref() == Some(CAPTION_SUBROLE);
+        if is_caption || !captions_only {
+            if let Some(v) = ax_string(element, "AXValue") {
+                for line in v.lines().map(str::trim).filter(|l| !l.is_empty()) {
+                    if is_caption || !crate::buffer::is_junk_line(line) {
+                        out.push(line.to_string());
                     }
                 }
-                CFRelease(names);
             }
         }
+        return;
     }
-
     if let Some(children) = ax_copy(element, "AXChildren") {
         unsafe {
             let n = CFArrayGetCount(children);
-            for i in 0..n.min(80) {
-                let child = CFArrayGetValueAtIndex(children, i);
-                collect_strings(child, depth + 1, out);
+            for i in 0..n.min(200) {
+                collect_texts(CFArrayGetValueAtIndex(children, i), depth + 1, captions_only, out);
             }
             CFRelease(children);
         }
     }
 }
 
-fn pid_for_live_captions() -> Option<i32> {
-    // Prefer exact path match via pgrep -f
-    for pattern in [
-        "Live Captions.app/Contents/MacOS/Live Captions",
-        "Live Captions",
-        "LiveTranscriptionAgent",
-    ] {
-        let output = std::process::Command::new("pgrep")
-            .args(["-f", pattern])
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            continue;
+/// Caption lines in the order Live Captions shows them, read only from its windows
+/// (never the menu bar: its Recent Items list held media file names that were saved as
+/// captions). `None` when no caption window is up.
+fn read_caption_lines(app: *const c_void) -> Option<Vec<String>> {
+    let windows = ax_copy(app, "AXWindows")?;
+    let mut captions = Vec::new();
+    let mut fallback = Vec::new();
+    unsafe {
+        let n = CFArrayGetCount(windows);
+        for i in 0..n.min(12) {
+            let w = CFArrayGetValueAtIndex(windows, i);
+            collect_texts(w, 0, true, &mut captions);
         }
-        let s = String::from_utf8_lossy(&output.stdout);
-        if let Some(pid) = s
-            .lines()
-            .filter_map(|l| l.trim().parse::<i32>().ok())
-            .next()
-        {
-            return Some(pid);
+        if captions.is_empty() {
+            for i in 0..n.min(12) {
+                let w = CFArrayGetValueAtIndex(windows, i);
+                collect_texts(w, 0, false, &mut fallback);
+            }
+        }
+        CFRelease(windows);
+    }
+    let lines = if captions.is_empty() { fallback } else { captions };
+    (!lines.is_empty()).then_some(lines)
+}
+
+extern "C" {
+    // libproc + libc (libSystem, always linked).
+    fn proc_listallpids(buffer: *mut c_void, buffersize: c_int) -> c_int;
+    fn proc_pidpath(pid: c_int, buffer: *mut c_void, buffersize: u32) -> c_int;
+    fn kill(pid: c_int, sig: c_int) -> c_int;
+}
+
+const PROC_PIDPATHINFO_MAXSIZE: usize = 4096;
+const SIGTERM: c_int = 15;
+/// Longest a single Accessibility call may block (default is ~6 s). A busy Live
+/// Captions must not stall the capture loop (Windows v0.3.0 uses 2.5 s for UIA).
+const AX_CALL_TIMEOUT_SECS: f32 = 2.5;
+
+/// Executable path of `pid`, if it is still running.
+pub(crate) fn process_path(pid: i32) -> Option<String> {
+    let mut buf = vec![0u8; PROC_PIDPATHINFO_MAXSIZE];
+    let n = unsafe {
+        proc_pidpath(pid, buf.as_mut_ptr() as *mut c_void, buf.len() as u32)
+    };
+    if n <= 0 {
+        return None;
+    }
+    buf.truncate(n as usize);
+    String::from_utf8(buf).ok()
+}
+
+fn is_live_captions_path(path: &str) -> bool {
+    path.ends_with("/Live Captions.app/Contents/MacOS/Live Captions")
+        || path.ends_with("/LiveTranscriptionAgent")
+}
+
+/// Live Captions' PID, found in-process (no `pgrep` per poll). The last PID is cached
+/// and re-checked by path, so a steady poll costs one syscall.
+pub fn live_captions_pid() -> Option<i32> {
+    use std::sync::atomic::{AtomicI32, Ordering};
+    static LAST: AtomicI32 = AtomicI32::new(0);
+
+    let last = LAST.load(Ordering::Relaxed);
+    if last > 0 && process_path(last).is_some_and(|p| is_live_captions_path(&p)) {
+        return Some(last);
+    }
+    let mut pids = vec![0i32; 4096];
+    let n = unsafe {
+        proc_listallpids(
+            pids.as_mut_ptr() as *mut c_void,
+            (pids.len() * std::mem::size_of::<i32>()) as c_int,
+        )
+    };
+    if n <= 0 {
+        return None;
+    }
+    pids.truncate((n as usize).min(pids.len()));
+    let found = pids
+        .into_iter()
+        .filter(|&p| p > 0)
+        .find(|&p| process_path(p).is_some_and(|path| is_live_captions_path(&path)));
+    LAST.store(found.unwrap_or(0), Ordering::Relaxed);
+    found
+}
+
+/// Cap every Accessibility call (set on the system-wide element, it applies to all
+/// elements this process reads).
+fn set_ax_timeout_once() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| unsafe {
+        let sys = AXUIElementCreateSystemWide();
+        if !sys.is_null() {
+            // Kept for the life of the process so the setting stays in force.
+            AXUIElementSetMessagingTimeout(sys, AX_CALL_TIMEOUT_SECS);
+        }
+    });
+}
+
+fn pid_for_live_captions() -> Option<i32> {
+    live_captions_pid()
+}
+
+/// Open System Settings → Accessibility → Live Captions. macOS does not let other apps
+/// switch Live Captions on, so the user flips the switch there.
+pub fn open_live_captions_settings() -> std::io::Result<()> {
+    let status = std::process::Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.Accessibility-Settings.extension?LiveCaptions")
+        .status()?;
+    if status.success() {
+        return Ok(());
+    }
+    // Older layouts: the Accessibility pane itself.
+    std::process::Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.universalaccess")
+        .status()
+        .map(|_| ())
+}
+
+/// Quit Live Captions so macOS starts it again (it stays on in Settings). If it has
+/// not come back after a few seconds, open its settings so the user can switch it on.
+pub fn restart_live_captions() -> std::io::Result<()> {
+    let Some(pid) = live_captions_pid() else {
+        return open_live_captions_settings();
+    };
+    unsafe {
+        kill(pid, SIGTERM);
+    }
+    for _ in 0..12 {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        if live_captions_pid().is_some_and(|p| p != pid) {
+            return Ok(());
         }
     }
-    None
+    crate::debuglog::log("Live Captions did not restart by itself — opening its settings");
+    open_live_captions_settings()
 }
 
 /// Ask macOS to show the Accessibility permission dialog at most **once per process**.
@@ -308,6 +393,7 @@ pub fn poll_text(presence: LiveCaptionsPresence) -> CaptureSnapshot {
         };
     };
 
+    set_ax_timeout_once();
     let app = unsafe { AXUIElementCreateApplication(pid) };
     if app.is_null() {
         return CaptureSnapshot {
@@ -318,67 +404,35 @@ pub fn poll_text(presence: LiveCaptionsPresence) -> CaptureSnapshot {
         };
     }
 
-    let mut strings = Vec::new();
-    if let Some(windows) = ax_copy(app, "AXWindows") {
-        unsafe {
-            let n = CFArrayGetCount(windows);
-            if n == 0 {
-                // Window list empty — still walk the app element (agent UI).
-                collect_strings(app, 0, &mut strings);
-            }
-            for i in 0..n.min(12) {
-                let w = CFArrayGetValueAtIndex(windows, i);
-                collect_strings(w, 0, &mut strings);
-            }
-            CFRelease(windows);
-        }
-    } else {
-        collect_strings(app, 0, &mut strings);
-    }
-    // Also try focused UI under the app
-    if let Some(focused) = ax_copy(app, "AXFocusedUIElement") {
-        collect_strings(focused, 0, &mut strings);
-        unsafe { CFRelease(focused) };
-    }
+    let lines = read_caption_lines(app);
     unsafe { CFRelease(app) };
+    let surface = lines.map(|l| l.join("\n"));
 
-    // Rank non-junk candidates; pure picker never returns junk-only surfaces.
-    let candidate_count = strings.len();
-    let ranked = crate::buffer::rank_caption_candidates(strings.iter().map(|s| s.as_str()));
-    let surface = crate::buffer::pick_caption_surface(strings.iter().map(|s| s.as_str()));
-
-    // Top-N pick debug: prove AX saw short lines even when merge chooses multi-line.
-    if crate::debuglog::is_enabled() {
-        for (i, (sc, t)) in ranked.iter().take(8).enumerate() {
-            let preview: String = t.chars().take(100).collect();
-            crate::debuglog::log(&format!(
-                "macos pick top: [{i}] score={sc} chars={} {preview:?}",
-                t.chars().count()
-            ));
-        }
-        if let Some(ref s) = surface {
-            let lines = s.lines().filter(|l| !l.trim().is_empty()).count();
-            crate::debuglog::log(&format!(
-                "macos pick chosen: lines={lines} chars={} preview={:?}",
-                s.chars().count(),
-                s.chars().take(120).collect::<String>()
-            ));
-        } else {
-            crate::debuglog::log("macos pick chosen: none");
+    // Log only when what Live Captions shows changes (was every poll: 41 MB in 3 h).
+    {
+        use std::sync::Mutex;
+        static LAST: Mutex<Option<String>> = Mutex::new(None);
+        if let Ok(mut last) = LAST.lock() {
+            if *last != surface {
+                let count = surface.as_ref().map_or(0, |s| s.lines().count());
+                crate::debuglog::log(&format!(
+                    "macos captions pid={pid} lines={count} chars={} last={:?}",
+                    surface.as_ref().map_or(0, |s| s.chars().count()),
+                    surface
+                        .as_ref()
+                        .and_then(|s| s.lines().last())
+                        .map(|l| l.chars().take(100).collect::<String>())
+                        .unwrap_or_default()
+                ));
+                *last = surface.clone();
+            }
         }
     }
 
-    crate::debuglog::log(&format!(
-        "macos poll pid={pid} surface_chars={} candidates={} detail={}",
-        surface.as_ref().map(|s| s.chars().count()).unwrap_or(0),
-        candidate_count,
-        presence.detail
-    ));
-
-    if surface.is_none() {
-        // AX trusted + process up, but only chrome / empty tree — not a permission error.
+    match surface {
+        // AX trusted + process up, but no caption window (nothing heard yet, or hidden).
         // Engine treats surface_text=None as empty ticks (clear live); probe stays exit 0.
-        return CaptureSnapshot {
+        None => CaptureSnapshot {
             process_running: true,
             detail: format!(
                 "{}; pid={pid}; ax_trusted=true; no_caption_surface",
@@ -386,17 +440,13 @@ pub fn poll_text(presence: LiveCaptionsPresence) -> CaptureSnapshot {
             ),
             surface_text: None,
             error: None,
-        };
-    }
-
-    CaptureSnapshot {
-        process_running: true,
-        detail: format!(
-            "{}; pid={pid}; ax_trusted=true; surface_ok",
-            presence.detail
-        ),
-        surface_text: surface,
-        error: None,
+        },
+        Some(text) => CaptureSnapshot {
+            process_running: true,
+            detail: format!("{}; pid={pid}; ax_trusted=true; surface_ok", presence.detail),
+            surface_text: Some(text),
+            error: None,
+        },
     }
 }
 
@@ -420,51 +470,82 @@ pub fn diagnose_lines() -> Vec<String> {
         lines.push("Live Captions process not found — turn Live Captions on.".into());
         return lines;
     };
+    set_ax_timeout_once();
     let app = unsafe { AXUIElementCreateApplication(pid) };
     if app.is_null() {
         lines.push("AXUIElementCreateApplication failed".into());
         return lines;
     }
-    let mut strings = Vec::new();
-    if let Some(windows) = ax_copy(app, "AXWindows") {
-        unsafe {
-            let n = CFArrayGetCount(windows);
-            lines.push(format!("ax_windows={n}"));
-            for i in 0..n.min(12) {
-                let w = CFArrayGetValueAtIndex(windows, i);
-                collect_strings(w, 0, &mut strings);
+    let windows = ax_copy(app, "AXWindows")
+        .map(|w| {
+            let n = unsafe { CFArrayGetCount(w) };
+            unsafe { CFRelease(w) };
+            n
+        })
+        .unwrap_or(0);
+    lines.push(format!("ax_windows={windows}"));
+    match read_caption_lines(app) {
+        Some(captions) => {
+            lines.push(format!("caption_lines={}", captions.len()));
+            for (i, c) in captions.iter().enumerate().rev().take(5).rev() {
+                let preview: String = c.chars().take(120).collect();
+                lines.push(format!("caption[{i}] {preview}"));
             }
-            CFRelease(windows);
         }
-    } else {
-        lines.push("ax_windows=none (walking app root)".into());
-        collect_strings(app, 0, &mut strings);
+        None => lines.push(
+            "No caption lines. Live Captions shows its window once it hears speech — play something and run diagnose again."
+                .into(),
+        ),
     }
     unsafe { CFRelease(app) };
-    lines.push(format!("ax_text_nodes={}", strings.len()));
-    // Speech-ranked samples (same scorer as live pick), not merely longest chrome.
-    let ranked = crate::buffer::rank_caption_candidates(strings.iter().map(|s| s.as_str()));
-    for (i, (sc, s)) in ranked.iter().take(5).enumerate() {
-        let preview: String = s.chars().take(120).collect();
-        lines.push(format!(
-            "sample[{i}] score={sc} chars={} text={preview}",
-            s.chars().count()
-        ));
-    }
-    if let Some(picked) = crate::buffer::pick_caption_surface(strings.iter().map(|s| s.as_str())) {
-        let preview: String = picked.chars().take(160).collect();
-        lines.push(format!(
-            "pick_merge chars={} text={preview}",
-            picked.chars().count()
-        ));
-    } else {
-        lines.push("pick_merge=none".into());
-    }
-    if ranked.is_empty() {
-        lines.push(
-            "No AX text found. Confirm Live Captions window is visible and audio is playing."
-                .into(),
-        );
-    }
     lines
+}
+
+#[cfg(test)]
+mod tree_tests {
+    use super::*;
+
+    fn dump(el: *const c_void, depth: usize) {
+        if depth > 14 {
+            return;
+        }
+        let get = |a: &str| {
+            ax_copy(el, a).and_then(|v| {
+                let s = cfstring_to_rust(v);
+                unsafe { CFRelease(v) };
+                s
+            })
+        };
+        let role = get("AXRole").unwrap_or_default();
+        let sub = get("AXSubrole").unwrap_or_default();
+        let id = get("AXIdentifier").unwrap_or_default();
+        let desc = get("AXDescription").unwrap_or_default();
+        let title = get("AXTitle").unwrap_or_default();
+        let val: String = get("AXValue").unwrap_or_default().chars().take(70).collect();
+        println!(
+            "{}{role} sub={sub} id={id} desc={desc:?} title={title:?} value={val:?}",
+            "  ".repeat(depth)
+        );
+        if let Some(children) = ax_copy(el, "AXChildren") {
+            unsafe {
+                for i in 0..CFArrayGetCount(children) {
+                    dump(CFArrayGetValueAtIndex(children, i), depth + 1);
+                }
+                CFRelease(children);
+            }
+        }
+    }
+
+    /// `cargo test --lib dump_ax_tree -- --ignored --nocapture` with Live Captions on.
+    #[test]
+    #[ignore]
+    fn dump_ax_tree() {
+        let pid = live_captions_pid().expect("Live Captions running");
+        let app = unsafe { AXUIElementCreateApplication(pid) };
+        dump(app, 0);
+        if let Some(f) = ax_copy(app, "AXFocusedUIElement") {
+            println!("--- focused:");
+            dump(f, 0);
+        }
+    }
 }

@@ -3,6 +3,8 @@
 //! Strict zero third-party crates (crates.io). Platform UI/scrape via system
 //! frameworks + hand-written FFI / native clang objects.
 
+#[cfg(any(windows, target_os = "macos"))]
+pub mod app_view;
 pub mod assets_check;
 pub mod auto_record;
 pub mod buffer;

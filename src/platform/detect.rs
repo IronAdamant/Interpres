@@ -2,8 +2,6 @@
 
 #[cfg(windows)]
 use super::signals::windows_signals;
-#[cfg(target_os = "macos")]
-use super::signals::macos_signals;
 
 #[derive(Clone, Debug)]
 pub struct LiveCaptionsPresence {
@@ -160,65 +158,16 @@ fn detect_windows() -> LiveCaptionsPresence {
 
 #[cfg(target_os = "macos")]
 fn detect_macos() -> LiveCaptionsPresence {
-    let signals = macos_signals();
-    // pgrep by bundle id path / process name
-    // Try pgrep -fl for full command line
-    let output = std::process::Command::new("pgrep")
-        .args(["-fl", "Live"])
-        .output();
-    match output {
-        Ok(out) => {
-            let text = String::from_utf8_lossy(&out.stdout);
-            for sub in signals.process_substrings {
-                if text.lines().any(|l| l.contains(sub)) {
-                    return LiveCaptionsPresence {
-                        running: true,
-                        detail: format!("process matched: {sub}"),
-                    };
-                }
-            }
-            // Also try exact pgrep for Live Captions
-            if let Ok(out2) = std::process::Command::new("pgrep")
-                .args(["-f", "Live Captions"])
-                .output()
-            {
-                if out2.status.success() && !out2.stdout.is_empty() {
-                    return LiveCaptionsPresence {
-                        running: true,
-                        detail: "pgrep -f 'Live Captions' matched".into(),
-                    };
-                }
-            }
-            LiveCaptionsPresence {
-                running: false,
-                detail: "Live Captions agent not running".into(),
-            }
-        }
-        Err(e) => {
-            // Fallback: ps
-            if let Ok(out) = std::process::Command::new("ps")
-                .args(["-ax", "-o", "command="])
-                .output()
-            {
-                let text = String::from_utf8_lossy(&out.stdout);
-                for sub in signals.process_substrings {
-                    if text.contains(sub) {
-                        return LiveCaptionsPresence {
-                            running: true,
-                            detail: format!("ps matched: {sub}"),
-                        };
-                    }
-                }
-                return LiveCaptionsPresence {
-                    running: false,
-                    detail: format!("ps scan: Live Captions not found (pgrep err: {e})"),
-                };
-            }
-            LiveCaptionsPresence {
-                running: false,
-                detail: format!("process scan failed: {e}"),
-            }
-        }
+    // In-process process scan (libproc), no `pgrep` spawn per poll.
+    match super::macos::live_captions_pid() {
+        Some(pid) => LiveCaptionsPresence {
+            running: true,
+            detail: format!("Live Captions running (pid {pid})"),
+        },
+        None => LiveCaptionsPresence {
+            running: false,
+            detail: "Live Captions agent not running".into(),
+        },
     }
 }
 

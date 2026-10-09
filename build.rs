@@ -50,6 +50,7 @@ fn build_macos_gui(manifest: &Path, out_dir: &Path) {
     println!("cargo:rustc-link-lib=framework=AppKit");
     println!("cargo:rustc-link-lib=framework=Foundation");
     println!("cargo:rustc-link-lib=framework=Cocoa");
+    println!("cargo:rustc-link-lib=framework=QuartzCore");
 }
 
 fn build_windows_resources(manifest: &Path, out_dir: &Path) {

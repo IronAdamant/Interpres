@@ -1,342 +1,457 @@
 /*
  * Interpres native macOS UI — AppKit only (system frameworks).
- * Large high-contrast controls for Deaf / hard-of-hearing users.
- * Light / dark palettes match Windows (src/theme.rs + gui_win.rs).
+ *
+ * Same layout as the Windows window (src/gui_win.rs): title + Auto-record checkbox +
+ * Settings menu, a coloured status banner, one Start/Stop button plus a contextual
+ * Live Captions button, a setup checklist, one transcript view (saved lines + the line
+ * being spoken), and a footer with Open / Copy / Folder actions.
+ *
+ * This file only draws. Rust decides what every control shows (src/app_view.rs) and
+ * pushes it through interpres_gui.h. Palettes mirror src/theme.rs.
  */
 #import <Cocoa/Cocoa.h>
+#import <QuartzCore/QuartzCore.h>
 #include "interpres_gui.h"
 #include <string.h>
 
+@class IPFilledButton;
+
 static InterpresGuiCallbacks g_cbs;
-static NSTextField *g_title;
-static NSTextField *g_subtitle;
-static NSTextField *g_status;
-static NSTextField *g_statusLbl;
-static NSTextField *g_liveLbl;
-static NSTextField *g_histLbl;
-static NSTextView *g_live;
-static NSTextView *g_history;
-static NSScrollView *g_liveScroll;
-static NSScrollView *g_histScroll;
-static NSTextField *g_folder;
-static NSTextField *g_session;
-static NSButton *g_startBtn;
-static NSButton *g_stopBtn;
-static NSButton *g_rememberBtn;
-static NSButton *g_debugBtn;
-static NSButton *g_themeBtn;
-static NSButton *g_folderBtn;
-static NSButton *g_openBtn;
-static NSButton *g_checkBtn;
 static NSWindow *g_window;
+static NSTextField *g_title;
+static NSButton *g_auto;
+static NSButton *g_settings;
+static NSView *g_banner;
+static NSTextField *g_bannerHead;
+static NSTextField *g_bannerDetail;
+static IPFilledButton *g_toggle;
+static IPFilledButton *g_action;
+static NSTextField *g_checks;
+static NSTextField *g_detail;
+static NSTextField *g_transcriptLbl;
+static NSScrollView *g_transcriptScroll;
+static NSTextView *g_transcript;
+static NSTextField *g_file;
+static NSButton *g_openFile;
+static NSButton *g_copy;
+static NSButton *g_openFolder;
+static NSTimer *g_timer;
 /* 0 = system, 1 = light, 2 = dark — mirrors ThemeMode in Rust */
 static int g_theme_mode = 0;
+static int g_tone = INTERPRES_TONE_NEUTRAL;
+static int g_recording = 0;
+static int g_quit_sent = 0;
+/* Item chosen in the Settings menu while it is open. */
+static int g_menu_choice = 0;
 
-/* Shared tokens with src/theme.rs PALETTE_DARK / PALETTE_LIGHT */
+/* ---------- palette (src/theme.rs) ---------- */
+
 static BOOL effectiveIsDark(void) {
     if (g_theme_mode == 1)
         return NO;
     if (g_theme_mode == 2)
         return YES;
     NSAppearance *a = [NSApp effectiveAppearance];
-    if (!a) {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-        a = [NSAppearance currentAppearance];
-#pragma clang diagnostic pop
-    }
     NSAppearanceName name =
         [a bestMatchFromAppearancesWithNames:@[ NSAppearanceNameAqua, NSAppearanceNameDarkAqua ]];
     return [name isEqualToString:NSAppearanceNameDarkAqua];
 }
 
+static NSColor *rgb(CGFloat r, CGFloat g, CGFloat b) {
+    return [NSColor colorWithSRGBRed:r green:g blue:b alpha:1.0];
+}
 static NSColor *bgColor(void) {
-    if (effectiveIsDark())
-        return [NSColor colorWithCalibratedRed:0.07 green:0.08 blue:0.10 alpha:1.0];
-    return [NSColor colorWithCalibratedRed:0.96 green:0.96 blue:0.97 alpha:1.0];
+    return effectiveIsDark() ? rgb(0.07, 0.08, 0.10) : rgb(0.96, 0.96, 0.97);
 }
 static NSColor *panelColor(void) {
-    if (effectiveIsDark())
-        return [NSColor colorWithCalibratedRed:0.12 green:0.13 blue:0.16 alpha:1.0];
-    return [NSColor colorWithCalibratedRed:1.0 green:1.0 blue:1.0 alpha:1.0];
-}
-static NSColor *accentColor(void) {
-    if (effectiveIsDark())
-        return [NSColor colorWithCalibratedRed:0.20 green:0.75 blue:0.55 alpha:1.0];
-    return [NSColor colorWithCalibratedRed:0.10 green:0.61 blue:0.43 alpha:1.0];
+    return effectiveIsDark() ? rgb(0.12, 0.13, 0.16) : rgb(1.0, 1.0, 1.0);
 }
 static NSColor *textColor(void) {
-    if (effectiveIsDark())
-        return [NSColor colorWithCalibratedWhite:0.95 alpha:1.0];
-    return [NSColor colorWithCalibratedRed:0.10 green:0.11 blue:0.13 alpha:1.0];
+    return effectiveIsDark() ? rgb(0.95, 0.95, 0.95) : rgb(0.10, 0.11, 0.13);
 }
 static NSColor *mutedColor(void) {
-    if (effectiveIsDark())
-        return [NSColor colorWithCalibratedWhite:0.65 alpha:1.0];
-    return [NSColor colorWithCalibratedRed:0.36 green:0.39 blue:0.44 alpha:1.0];
+    return effectiveIsDark() ? rgb(0.65, 0.65, 0.65) : rgb(0.36, 0.39, 0.44);
 }
-static NSColor *buttonColor(void) {
-    if (effectiveIsDark())
-        return [NSColor colorWithCalibratedRed:0.18 green:0.19 blue:0.22 alpha:1.0];
-    return [NSColor colorWithCalibratedRed:0.90 green:0.91 blue:0.93 alpha:1.0];
+static NSColor *borderColor(void) {
+    return effectiveIsDark() ? rgb(0.28, 0.30, 0.34) : rgb(0.78, 0.80, 0.83);
+}
+/* Fixed status colours — same RGB as COL_* in gui_win.rs. */
+static NSColor *colRecording(void) { return rgb(28 / 255.0, 128 / 255.0, 72 / 255.0); }
+static NSColor *colWaiting(void) { return rgb(37 / 255.0, 99 / 255.0, 160 / 255.0); }
+static NSColor *colProblem(void) { return rgb(176 / 255.0, 36 / 255.0, 36 / 255.0); }
+static NSColor *colAction(void) { return rgb(166 / 255.0, 92 / 255.0, 0); }
+
+static NSColor *toneColor(int tone) {
+    switch (tone) {
+    case INTERPRES_TONE_RECORDING: return colRecording();
+    case INTERPRES_TONE_WAITING: return colWaiting();
+    case INTERPRES_TONE_PROBLEM: return colProblem();
+    case INTERPRES_TONE_ACTION: return colAction();
+    default: return panelColor();
+    }
 }
 
-static void styleButton(NSButton *b) {
-    if (!b)
-        return;
-    [b setWantsLayer:YES];
-    if (b.layer) {
-        b.layer.backgroundColor = [buttonColor() CGColor];
-        b.layer.cornerRadius = 8.0;
-        b.layer.borderWidth = 1.0;
-        b.layer.borderColor = [[mutedColor() colorWithAlphaComponent:0.35] CGColor];
-    }
-    /* Content tint for title text on modern macOS */
-    if ([b respondsToSelector:@selector(setContentTintColor:)]) {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wpartial-availability"
-        [b setContentTintColor:textColor()];
-#pragma clang diagnostic pop
-    }
-    NSMutableAttributedString *attr = [[NSMutableAttributedString alloc]
-        initWithString:[b title] ?: @""];
+static NSString *str(const char *s) {
+    if (!s)
+        return @"";
+    NSString *v = [NSString stringWithUTF8String:s];
+    return v ?: @"";
+}
+
+/* ---------- views ---------- */
+
+/* Top-left origin, like the Windows layout. */
+@interface IPFlippedView : NSView
+@end
+@implementation IPFlippedView
+- (BOOL)isFlipped {
+    return YES;
+}
+@end
+
+/* Rounded, filled button with white text (Start/Stop and the Live Captions action). */
+@interface IPFilledButton : NSButton
+@property(nonatomic, strong) NSColor *fill;
+@end
+@implementation IPFilledButton
+- (void)drawRect:(NSRect)dirty {
+    (void)dirty;
+    NSRect r = NSInsetRect(self.bounds, 0.5, 0.5);
+    NSColor *c = self.fill ?: colRecording();
+    if (self.isHighlighted)
+        c = [c blendedColorWithFraction:0.15 ofColor:NSColor.blackColor];
+    if (!self.isEnabled)
+        c = [c colorWithAlphaComponent:0.55];
+    [c setFill];
+    [[NSBezierPath bezierPathWithRoundedRect:r xRadius:9 yRadius:9] fill];
+    NSMutableParagraphStyle *ps = [[NSMutableParagraphStyle alloc] init];
+    ps.alignment = NSTextAlignmentCenter;
     NSDictionary *attrs = @{
-        NSForegroundColorAttributeName : textColor(),
-        NSFontAttributeName : [NSFont boldSystemFontOfSize:18.0]
+        NSFontAttributeName : [NSFont systemFontOfSize:17 weight:NSFontWeightSemibold],
+        NSForegroundColorAttributeName : NSColor.whiteColor,
+        NSParagraphStyleAttributeName : ps,
     };
-    [attr setAttributes:attrs range:NSMakeRange(0, [attr length])];
-    [b setAttributedTitle:attr];
+    NSString *t = self.title ?: @"";
+    NSSize sz = [t sizeWithAttributes:attrs];
+    NSRect tr = NSMakeRect(0, (NSHeight(self.bounds) - sz.height) / 2, NSWidth(self.bounds), sz.height);
+    [t drawInRect:tr withAttributes:attrs];
 }
-
-static void applyThemeToControls(void) {
-    if (g_window)
-        [g_window setBackgroundColor:bgColor()];
-
-    void (^paintLabel)(NSTextField *, NSColor *) = ^(NSTextField *t, NSColor *c) {
-      if (t)
-          [t setTextColor:c];
-    };
-    paintLabel(g_title, textColor());
-    paintLabel(g_subtitle, mutedColor());
-    paintLabel(g_statusLbl, textColor());
-    paintLabel(g_liveLbl, textColor());
-    paintLabel(g_histLbl, textColor());
-    paintLabel(g_status, mutedColor());
-    paintLabel(g_folder, mutedColor());
-    paintLabel(g_session, mutedColor());
-
-    if (g_live) {
-        [g_live setBackgroundColor:panelColor()];
-        [g_live setTextColor:textColor()];
-        [g_live setInsertionPointColor:textColor()];
-    }
-    if (g_history) {
-        [g_history setBackgroundColor:panelColor()];
-        [g_history setTextColor:textColor()];
-        [g_history setInsertionPointColor:textColor()];
-    }
-    if (g_liveScroll) {
-        [g_liveScroll setBackgroundColor:panelColor()];
-        [[g_liveScroll contentView] setBackgroundColor:panelColor()];
-    }
-    if (g_histScroll) {
-        [g_histScroll setBackgroundColor:panelColor()];
-        [[g_histScroll contentView] setBackgroundColor:panelColor()];
-    }
-
-    styleButton(g_startBtn);
-    styleButton(g_stopBtn);
-    styleButton(g_rememberBtn);
-    styleButton(g_debugBtn);
-    styleButton(g_themeBtn);
-    styleButton(g_folderBtn);
-    styleButton(g_openBtn);
-    styleButton(g_checkBtn);
-
-    if (g_themeBtn) {
-        NSString *title = @"Theme: System";
-        if (g_theme_mode == 1)
-            title = @"Theme: Light";
-        else if (g_theme_mode == 2)
-            title = @"Theme: Dark";
-        [g_themeBtn setTitle:title];
-        styleButton(g_themeBtn);
-    }
-
-    (void)accentColor; /* reserved for future focus/primary affordances */
-    if (g_window)
-        [g_window displayIfNeeded];
+- (BOOL)isFlipped {
+    return YES;
 }
-
-static void applyForcedAppearance(void) {
-    if (g_theme_mode == 1) {
-        [NSApp setAppearance:[NSAppearance appearanceNamed:NSAppearanceNameAqua]];
-    } else if (g_theme_mode == 2) {
-        [NSApp setAppearance:[NSAppearance appearanceNamed:NSAppearanceNameDarkAqua]];
-    } else {
-        [NSApp setAppearance:nil]; /* follow system */
-    }
-    applyThemeToControls();
+/* Keyboard focus ring follows the rounded shape (the default is a standard-height
+ * button bar across the middle). */
+- (NSRect)focusRingMaskBounds {
+    return self.bounds;
 }
-
-static NSButton *makeButton(NSString *title, id target, SEL action, NSRect frame) {
-    NSButton *b = [[NSButton alloc] initWithFrame:frame];
-    [b setTitle:title];
-    [b setBezelStyle:NSBezelStyleRegularSquare];
-    [b setFont:[NSFont boldSystemFontOfSize:18.0]];
-    [b setTarget:target];
-    [b setAction:action];
-    [b setWantsLayer:YES];
-    styleButton(b);
-    return b;
+- (void)drawFocusRingMask {
+    [[NSBezierPath bezierPathWithRoundedRect:NSInsetRect(self.bounds, 0.5, 0.5) xRadius:9 yRadius:9] fill];
 }
+@end
 
-static NSTextField *makeLabel(NSString *text, NSRect frame, CGFloat size, BOOL bold) {
-    NSTextField *t = [[NSTextField alloc] initWithFrame:frame];
-    [t setStringValue:text];
-    [t setBezeled:NO];
-    [t setDrawsBackground:NO];
-    [t setEditable:NO];
-    [t setSelectable:YES];
-    [t setTextColor:textColor()];
-    [t setFont:(bold ? [NSFont boldSystemFontOfSize:size] : [NSFont systemFontOfSize:size])];
+static NSTextField *makeLabel(NSString *text, CGFloat size, NSFontWeight weight) {
+    NSTextField *t = [NSTextField labelWithString:text];
+    t.font = [NSFont systemFontOfSize:size weight:weight];
+    t.textColor = textColor();
+    t.lineBreakMode = NSLineBreakByTruncatingTail;
+    t.selectable = NO;
     return t;
 }
 
-static NSScrollView *makeScrollText(NSRect frame, NSTextView **outView, CGFloat fontSize) {
-    NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:frame];
-    [scroll setHasVerticalScroller:YES];
-    [scroll setBorderType:NSLineBorder];
-    [scroll setDrawsBackground:YES];
-    [scroll setBackgroundColor:panelColor()];
-    NSTextView *tv = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, frame.size.width, frame.size.height)];
-    [tv setMinSize:NSMakeSize(0.0, frame.size.height)];
-    [tv setMaxSize:NSMakeSize(FLT_MAX, FLT_MAX)];
-    [tv setVerticallyResizable:YES];
-    [tv setHorizontallyResizable:NO];
-    [tv setAutoresizingMask:NSViewWidthSizable];
-    [[tv textContainer] setContainerSize:NSMakeSize(frame.size.width, FLT_MAX)];
-    [[tv textContainer] setWidthTracksTextView:YES];
-    [tv setEditable:NO];
-    [tv setSelectable:YES];
-    [tv setBackgroundColor:panelColor()];
-    [tv setTextColor:textColor()];
-    [tv setFont:[NSFont systemFontOfSize:fontSize]];
-    [tv setString:@""];
-    [scroll setDocumentView:tv];
-    *outView = tv;
-    return scroll;
+static NSButton *makePlainButton(NSString *title, id target, SEL action) {
+    NSButton *b = [NSButton buttonWithTitle:title target:target action:action];
+    b.bezelStyle = NSBezelStyleRounded;
+    b.controlSize = NSControlSizeLarge;
+    b.font = [NSFont systemFontOfSize:15];
+    return b;
 }
 
-@interface InterpresAppDelegate : NSObject <NSApplicationDelegate>
+static IPFilledButton *makeFilledButton(NSString *title, id target, SEL action) {
+    IPFilledButton *b = [[IPFilledButton alloc] initWithFrame:NSZeroRect];
+    b.title = title;
+    b.bordered = NO;
+    b.target = target;
+    b.action = action;
+    b.wantsLayer = YES;
+    return b;
+}
+
+static NSDictionary *transcriptAttrs(void) {
+    NSMutableParagraphStyle *ps = [[NSMutableParagraphStyle alloc] init];
+    ps.paragraphSpacing = 4;
+    ps.headIndent = 0;
+    return @{
+        NSFontAttributeName : [NSFont systemFontOfSize:18],
+        NSForegroundColorAttributeName : textColor(),
+        NSParagraphStyleAttributeName : ps,
+    };
+}
+
+/* ---------- theme ---------- */
+
+static void paintBanner(void) {
+    if (!g_banner)
+        return;
+    g_banner.layer.backgroundColor = toneColor(g_tone).CGColor;
+    BOOL neutral = (g_tone == INTERPRES_TONE_NEUTRAL);
+    g_banner.layer.borderWidth = neutral ? 1.0 : 0.0;
+    g_banner.layer.borderColor = borderColor().CGColor;
+    NSColor *fg = neutral ? textColor() : NSColor.whiteColor;
+    g_bannerHead.textColor = fg;
+    g_bannerDetail.textColor = neutral ? mutedColor() : [NSColor.whiteColor colorWithAlphaComponent:0.92];
+}
+
+static void applyTheme(void) {
+    if (!g_window)
+        return;
+    g_window.backgroundColor = bgColor();
+    g_window.contentView.layer.backgroundColor = bgColor().CGColor;
+    g_title.textColor = textColor();
+    g_checks.textColor = textColor();
+    g_detail.textColor = mutedColor();
+    g_transcriptLbl.textColor = textColor();
+    g_file.textColor = mutedColor();
+    g_transcript.backgroundColor = panelColor();
+    g_transcriptScroll.backgroundColor = panelColor();
+    g_transcriptScroll.wantsLayer = YES;
+    g_transcriptScroll.layer.borderColor = borderColor().CGColor;
+    g_transcriptScroll.layer.borderWidth = 1.0;
+    g_transcriptScroll.layer.cornerRadius = 6.0;
+    NSTextStorage *ts = g_transcript.textStorage;
+    [ts addAttribute:NSForegroundColorAttributeName value:textColor() range:NSMakeRange(0, ts.length)];
+    g_transcript.typingAttributes = transcriptAttrs();
+    g_toggle.fill = g_recording ? colProblem() : colRecording();
+    [g_toggle setNeedsDisplay:YES];
+    paintBanner();
+}
+
+static void applyAppearance(void) {
+    if (g_theme_mode == 1)
+        NSApp.appearance = [NSAppearance appearanceNamed:NSAppearanceNameAqua];
+    else if (g_theme_mode == 2)
+        NSApp.appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
+    else
+        NSApp.appearance = nil;
+    applyTheme();
+}
+
+/* ---------- layout (mirrors gui_win.rs `layout`) ---------- */
+
+static void layoutWindow(void) {
+    NSView *content = g_window.contentView;
+    CGFloat w = NSWidth(content.bounds), h = NSHeight(content.bounds);
+    CGFloat m = 20, bw = MAX(w - m * 2, 200);
+
+    g_title.frame = NSMakeRect(m, 12, 300, 38);
+    g_settings.frame = NSMakeRect(w - m - 140, 14, 140, 34);
+    g_auto.frame = NSMakeRect(w - m - 140 - 16 - 260, 18, 260, 26);
+
+    g_banner.frame = NSMakeRect(m, 62, bw, 78);
+    g_bannerHead.frame = NSMakeRect(18, 10, bw - 36, 30);
+    g_bannerDetail.frame = NSMakeRect(18, 44, bw - 36, 24);
+
+    CGFloat by = 156;
+    g_toggle.frame = NSMakeRect(m, by, 240, 48);
+    g_action.frame = NSMakeRect(m + 256, by, 240, 48);
+    g_checks.frame = NSMakeRect(m, by + 62, bw, 22);
+    g_detail.frame = NSMakeRect(m, by + 88, bw, 20);
+
+    CGFloat ty = by + 120;
+    g_transcriptLbl.frame = NSMakeRect(m, ty, 200, 22);
+    CGFloat footer_h = 58;
+    CGFloat th = MAX(h - (ty + 26) - footer_h, 80);
+    g_transcriptScroll.frame = NSMakeRect(m, ty + 26, bw, th);
+
+    CGFloat fy = h - footer_h + 12;
+    CGFloat btn_w[3] = {170, 110, 130};
+    CGFloat gap = 10;
+    CGFloat buttons_w = btn_w[0] + btn_w[1] + btn_w[2] + gap * 2;
+    CGFloat x = m + bw - buttons_w;
+    g_file.frame = NSMakeRect(m, fy + 8, MAX(x - m - 12, 80), 20);
+    NSButton *btns[3] = {g_openFile, g_copy, g_openFolder};
+    for (int i = 0; i < 3; i++) {
+        btns[i].frame = NSMakeRect(x, fy, btn_w[i], 34);
+        x += btn_w[i] + gap;
+    }
+}
+
+/* ---------- app delegate ---------- */
+
+@interface InterpresAppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate>
+@property(nonatomic) BOOL startMinimized;
 @end
 
 @implementation InterpresAppDelegate
 
+- (void)buildMainMenu {
+    NSMenu *bar = [[NSMenu alloc] init];
+
+    NSMenuItem *appItem = [[NSMenuItem alloc] init];
+    NSMenu *app = [[NSMenu alloc] initWithTitle:@"Interpres"];
+    [app addItemWithTitle:@"About Interpres"
+                   action:@selector(orderFrontStandardAboutPanel:)
+            keyEquivalent:@""];
+    [app addItem:[NSMenuItem separatorItem]];
+    NSMenuItem *prefs = [app addItemWithTitle:@"Settings…" action:@selector(onPreferences:) keyEquivalent:@","];
+    prefs.target = self;
+    [app addItem:[NSMenuItem separatorItem]];
+    [app addItemWithTitle:@"Hide Interpres" action:@selector(hide:) keyEquivalent:@"h"];
+    NSMenuItem *others = [app addItemWithTitle:@"Hide Others"
+                                        action:@selector(hideOtherApplications:)
+                                 keyEquivalent:@"h"];
+    others.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagOption;
+    [app addItemWithTitle:@"Show All" action:@selector(unhideAllApplications:) keyEquivalent:@""];
+    [app addItem:[NSMenuItem separatorItem]];
+    [app addItemWithTitle:@"Quit Interpres" action:@selector(terminate:) keyEquivalent:@"q"];
+    appItem.submenu = app;
+    [bar addItem:appItem];
+
+    NSMenuItem *editItem = [[NSMenuItem alloc] init];
+    NSMenu *edit = [[NSMenu alloc] initWithTitle:@"Edit"];
+    [edit addItemWithTitle:@"Copy" action:@selector(copy:) keyEquivalent:@"c"];
+    [edit addItemWithTitle:@"Select All" action:@selector(selectAll:) keyEquivalent:@"a"];
+    editItem.submenu = edit;
+    [bar addItem:editItem];
+
+    NSMenuItem *winItem = [[NSMenuItem alloc] init];
+    NSMenu *win = [[NSMenu alloc] initWithTitle:@"Window"];
+    [win addItemWithTitle:@"Minimize" action:@selector(performMiniaturize:) keyEquivalent:@"m"];
+    [win addItemWithTitle:@"Close" action:@selector(performClose:) keyEquivalent:@"w"];
+    winItem.submenu = win;
+    [bar addItem:winItem];
+    NSApp.windowsMenu = win;
+
+    NSApp.mainMenu = bar;
+}
+
 - (void)applicationDidFinishLaunching:(NSNotification *)note {
     (void)note;
-    NSRect screen = [[NSScreen mainScreen] visibleFrame];
-    CGFloat w = 920, h = 700;
-    NSRect frame = NSMakeRect(NSMidX(screen) - w / 2, NSMidY(screen) - h / 2, w, h);
+    [self buildMainMenu];
 
+    NSRect screen = NSScreen.mainScreen.visibleFrame;
+    CGFloat w = 1000, h = 780;
+    w = MIN(w, NSWidth(screen) - 40);
+    h = MIN(h, NSHeight(screen) - 40);
+    NSRect frame = NSMakeRect(NSMidX(screen) - w / 2, NSMidY(screen) - h / 2, w, h);
     g_window = [[NSWindow alloc]
         initWithContentRect:frame
                   styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
                              NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable)
                     backing:NSBackingStoreBuffered
                       defer:NO];
-    [g_window setTitle:@"Interpres — Live Captions companion"];
-    [g_window setBackgroundColor:bgColor()];
-    [g_window setMinSize:NSMakeSize(720, 560)];
+    g_window.title = @"Interpres";
+    g_window.minSize = NSMakeSize(860, 560);
+    g_window.delegate = self;
+    g_window.releasedWhenClosed = NO;
+    g_window.frameAutosaveName = @"InterpresMainWindow";
 
-    NSView *content = [g_window contentView];
+    IPFlippedView *content = [[IPFlippedView alloc] initWithFrame:NSMakeRect(0, 0, w, h)];
+    content.wantsLayer = YES;
+    g_window.contentView = content;
 
-    /* Title */
-    g_title = makeLabel(@"Interpres", NSMakeRect(24, h - 56, 400, 36), 28, YES);
-    g_subtitle =
-        makeLabel(@"Records what Live Captions already shows — not a captioner by itself",
-                  NSMakeRect(24, h - 84, 700, 24), 14, NO);
-    [g_subtitle setTextColor:mutedColor()];
-    [content addSubview:g_title];
-    [content addSubview:g_subtitle];
+    g_title = makeLabel(@"Interpres", 28, NSFontWeightBold);
+    g_auto = [NSButton checkboxWithTitle:@"Auto-record when sound plays"
+                                  target:self
+                                  action:@selector(onAuto:)];
+    g_auto.font = [NSFont systemFontOfSize:16];
+    g_settings = makePlainButton(@"Settings  ▾", self, @selector(onSettings:));
 
-    /* Big controls row — labels match Windows (symbols + copy) */
-    g_startBtn = makeButton(@"▶  Start listening", self, @selector(onStart:),
-                            NSMakeRect(24, h - 150, 220, 52));
-    g_stopBtn = makeButton(@"■  Stop", self, @selector(onStop:),
-                           NSMakeRect(256, h - 150, 140, 52));
-    [g_stopBtn setEnabled:NO];
-    g_rememberBtn = makeButton(@"Save to disk: OFF", self, @selector(onRemember:),
-                               NSMakeRect(412, h - 150, 220, 52));
-    g_folderBtn = makeButton(@"Choose folder…", self, @selector(onChooseFolder:),
-                             NSMakeRect(648, h - 150, 180, 52));
-    g_openBtn = makeButton(@"Open folder", self, @selector(onOpenFolder:),
-                           NSMakeRect(648, h - 210, 180, 44));
-    g_checkBtn = makeButton(@"Check setup", self, @selector(onCheck:),
-                            NSMakeRect(24, h - 210, 180, 44));
-    g_debugBtn = makeButton(@"Debug: OFF", self, @selector(onDebug:),
-                            NSMakeRect(220, h - 210, 160, 44));
-    g_themeBtn = makeButton(@"Theme: System", self, @selector(onTheme:),
-                            NSMakeRect(396, h - 210, 180, 44));
+    g_banner = [[IPFlippedView alloc] initWithFrame:NSZeroRect];
+    g_banner.wantsLayer = YES;
+    g_banner.layer.cornerRadius = 10;
+    g_bannerHead = makeLabel(@"", 21, NSFontWeightSemibold);
+    g_bannerDetail = makeLabel(@"", 16, NSFontWeightRegular);
+    [g_banner addSubview:g_bannerHead];
+    [g_banner addSubview:g_bannerDetail];
 
-    [content addSubview:g_startBtn];
-    [content addSubview:g_stopBtn];
-    [content addSubview:g_rememberBtn];
-    [content addSubview:g_folderBtn];
-    [content addSubview:g_openBtn];
-    [content addSubview:g_checkBtn];
-    [content addSubview:g_debugBtn];
-    [content addSubview:g_themeBtn];
+    g_toggle = makeFilledButton(@"▶   Start recording", self, @selector(onToggle:));
+    g_toggle.keyEquivalent = @"\r";
+    g_action = makeFilledButton(@"Turn on Live Captions", self, @selector(onAction:));
+    g_action.fill = colAction();
+    g_action.hidden = YES;
 
-    /* Status — multi-line so Mac idle copy is not truncated mid-sentence */
-    g_statusLbl = makeLabel(@"Status", NSMakeRect(24, h - 250, 100, 20), 13, YES);
-    [content addSubview:g_statusLbl];
-    g_status = makeLabel(@"Turn on Live Captions, then press Start listening.",
-                         NSMakeRect(24, h - 300, w - 48, 48), 16, NO);
-    [g_status setTextColor:mutedColor()];
-    [g_status setUsesSingleLineMode:NO];
-    [g_status setLineBreakMode:NSLineBreakByWordWrapping];
-    [[g_status cell] setWraps:YES];
-    [content addSubview:g_status];
+    g_checks = makeLabel(@"", 16, NSFontWeightRegular);
+    g_detail = makeLabel(@"", 14, NSFontWeightRegular);
+    g_detail.selectable = YES;
+    g_transcriptLbl = makeLabel(@"Transcript", 16, NSFontWeightSemibold);
 
-    /* Live line — current partial/final only (not the saved list) */
-    g_liveLbl = makeLabel(@"Live (now)", NSMakeRect(24, h - 330, 280, 20), 13, YES);
-    [content addSubview:g_liveLbl];
-    NSTextView *liveLocal = nil;
-    g_liveScroll = makeScrollText(NSMakeRect(24, h - 440, w - 48, 100), &liveLocal, 22.0);
-    g_live = liveLocal;
-    [content addSubview:g_liveScroll];
+    g_transcriptScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 400, 200)];
+    g_transcriptScroll.hasVerticalScroller = YES;
+    g_transcriptScroll.borderType = NSNoBorder;
+    g_transcriptScroll.drawsBackground = YES;
+    NSSize cs = g_transcriptScroll.contentSize;
+    g_transcript = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, cs.width, cs.height)];
+    g_transcript.minSize = NSMakeSize(0, cs.height);
+    g_transcript.maxSize = NSMakeSize(FLT_MAX, FLT_MAX);
+    g_transcript.verticallyResizable = YES;
+    g_transcript.horizontallyResizable = NO;
+    g_transcript.autoresizingMask = NSViewWidthSizable;
+    g_transcript.textContainer.widthTracksTextView = YES;
+    g_transcript.textContainerInset = NSMakeSize(8, 8);
+    g_transcript.editable = NO;
+    g_transcript.selectable = YES;
+    g_transcript.richText = NO;
+    g_transcript.typingAttributes = transcriptAttrs();
+    g_transcriptScroll.documentView = g_transcript;
 
-    /* History — FINAL lines saved this session */
-    g_histLbl = makeLabel(@"Session (saved lines)", NSMakeRect(24, h - 470, 320, 20), 13, YES);
-    [content addSubview:g_histLbl];
-    NSTextView *histLocal = nil;
-    g_histScroll = makeScrollText(NSMakeRect(24, 70, w - 48, h - 550), &histLocal, 16.0);
-    g_history = histLocal;
-    [g_histScroll setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
-    [content addSubview:g_histScroll];
-    /* Folder + session path */
-    g_folder = makeLabel(@"Folder: …", NSMakeRect(24, 36, w - 48, 22), 13, NO);
-    [g_folder setTextColor:mutedColor()];
-    [content addSubview:g_folder];
-    g_session = makeLabel(@"", NSMakeRect(24, 12, w - 48, 22), 12, NO);
-    [g_session setTextColor:mutedColor()];
-    [content addSubview:g_session];
+    g_file = makeLabel(@"", 13, NSFontWeightRegular);
+    g_file.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    g_file.selectable = YES;
+    g_openFile = makePlainButton(@"Open transcript", self, @selector(onOpenFile:));
+    g_copy = makePlainButton(@"Copy all", self, @selector(onCopy:));
+    g_openFolder = makePlainButton(@"Open folder", self, @selector(onOpenFolder:));
+    g_openFile.enabled = NO;
+    g_copy.enabled = NO;
 
-    applyForcedAppearance();
+    for (NSView *v in @[
+             g_title, g_auto, g_settings, g_banner, g_toggle, g_action, g_checks, g_detail,
+             g_transcriptLbl, g_transcriptScroll, g_file, g_openFile, g_copy, g_openFolder
+         ])
+        [content addSubview:v];
 
-    /* Follow OS theme when mode is System */
-    [NSApp addObserver:self
-            forKeyPath:@"effectiveAppearance"
-               options:NSKeyValueObservingOptionNew
-               context:NULL];
+    layoutWindow();
+    applyAppearance();
+    [NSApp addObserver:self forKeyPath:@"effectiveAppearance" options:NSKeyValueObservingOptionNew context:NULL];
 
-    [g_window makeKeyAndOrderFront:nil];
-    [NSApp activateIgnoringOtherApps:YES];
-
-    /* Tell Rust the window exists so folder/save/theme labels can be applied. */
     if (g_cbs.on_ready)
         g_cbs.on_ready(g_cbs.user);
+    if (g_cbs.on_tick)
+        g_cbs.on_tick(g_cbs.user);
+
+    g_timer = [NSTimer scheduledTimerWithTimeInterval:0.05
+                                              repeats:YES
+                                                block:^(NSTimer *t) {
+                                                  (void)t;
+                                                  if (g_cbs.on_tick)
+                                                      g_cbs.on_tick(g_cbs.user);
+                                                }];
+
+    /* Dev aid: INTERPRES_SNAPSHOT=/path/shot.png saves a picture of the window
+     * (README screenshots, checking the layout without Screen Recording permission). */
+    const char *snap = getenv("INTERPRES_SNAPSHOT");
+    if (snap && snap[0]) {
+        NSString *path = str(snap);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+          NSView *v = g_window.contentView;
+          NSBitmapImageRep *rep = [v bitmapImageRepForCachingDisplayInRect:v.bounds];
+          [v cacheDisplayInRect:v.bounds toBitmapImageRep:rep];
+          NSData *png = [rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
+          [png writeToFile:path atomically:YES];
+        });
+    }
+
+    if (self.startMinimized) {
+        [g_window orderFront:nil];
+        [g_window miniaturize:nil];
+    } else {
+        [g_window makeKeyAndOrderFront:nil];
+        [NSApp activateIgnoringOtherApps:YES];
+    }
+}
+
+- (void)windowDidResize:(NSNotification *)note {
+    (void)note;
+    layoutWindow();
 }
 
 - (void)observeValueForKeyPath:(NSString *)keyPath
@@ -346,10 +461,38 @@ static NSScrollView *makeScrollText(NSRect frame, NSTextView **outView, CGFloat 
     (void)object;
     (void)change;
     (void)context;
-    if ([keyPath isEqualToString:@"effectiveAppearance"]) {
-        if (g_theme_mode == 0)
-            applyThemeToControls();
+    if ([keyPath isEqualToString:@"effectiveAppearance"] && g_theme_mode == 0) {
+        applyTheme();
+        if (g_cbs.on_appearance)
+            g_cbs.on_appearance(g_cbs.user);
     }
+}
+
+- (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender {
+    (void)sender;
+    return YES;
+}
+
+- (BOOL)applicationShouldHandleReopen:(NSApplication *)sender hasVisibleWindows:(BOOL)flag {
+    (void)sender;
+    if (!flag)
+        [g_window makeKeyAndOrderFront:nil];
+    return YES;
+}
+
+- (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender {
+    (void)sender;
+    if (!g_quit_sent) {
+        g_quit_sent = 1;
+        [g_timer invalidate];
+        g_timer = nil;
+        /* Disappear at once; saving the last sentence can take a couple of seconds. */
+        [g_window orderOut:nil];
+        [CATransaction flush];
+        if (g_cbs.on_quit)
+            g_cbs.on_quit(g_cbs.user);
+    }
+    return NSTerminateNow;
 }
 
 - (void)applicationWillTerminate:(NSNotification *)notification {
@@ -360,239 +503,211 @@ static NSScrollView *makeScrollText(NSRect frame, NSTextView **outView, CGFloat 
     }
 }
 
-- (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender {
-    (void)sender;
-    return YES;
+static void sendCommand(int cmd) {
+    if (g_cbs.on_command)
+        g_cbs.on_command(g_cbs.user, cmd);
 }
 
-- (void)onStart:(id)sender {
-    (void)sender;
-    if (g_cbs.on_start)
-        g_cbs.on_start(g_cbs.user);
-}
-- (void)onStop:(id)sender {
-    (void)sender;
-    if (g_cbs.on_stop)
-        g_cbs.on_stop(g_cbs.user);
-}
-- (void)onRemember:(id)sender {
-    (void)sender;
-    int next = [[g_rememberBtn title] containsString:@"ON"] ? 0 : 1;
-    if (g_cbs.on_remember)
-        g_cbs.on_remember(g_cbs.user, next);
-}
-- (void)onChooseFolder:(id)sender {
-    (void)sender;
-    if (g_cbs.on_choose_folder)
-        g_cbs.on_choose_folder(g_cbs.user);
-}
-- (void)onOpenFolder:(id)sender {
-    (void)sender;
-    if (g_cbs.on_open_folder)
-        g_cbs.on_open_folder(g_cbs.user);
-}
-- (void)onCheck:(id)sender {
-    (void)sender;
-    if (g_cbs.on_check)
-        g_cbs.on_check(g_cbs.user);
-}
-- (void)onDebug:(id)sender {
-    (void)sender;
-    int next = [[g_debugBtn title] containsString:@"ON"] ? 0 : 1;
-    if (g_cbs.on_debug)
-        g_cbs.on_debug(g_cbs.user, next);
-}
-- (void)onTheme:(id)sender {
-    (void)sender;
-    /* Cycle System → Light → Dark → System */
-    g_theme_mode = (g_theme_mode + 1) % 3;
-    applyForcedAppearance();
-    if (g_cbs.on_theme)
-        g_cbs.on_theme(g_cbs.user, g_theme_mode);
-}
+- (void)onToggle:(id)sender { (void)sender; sendCommand(INTERPRES_CMD_TOGGLE); }
+- (void)onAction:(id)sender { (void)sender; sendCommand(INTERPRES_CMD_ACTION); }
+- (void)onSettings:(id)sender { (void)sender; sendCommand(INTERPRES_CMD_SETTINGS); }
+- (void)onPreferences:(id)sender { (void)sender; sendCommand(INTERPRES_CMD_PREFERENCES); }
+- (void)onOpenFile:(id)sender { (void)sender; sendCommand(INTERPRES_CMD_OPEN_FILE); }
+- (void)onCopy:(id)sender { (void)sender; sendCommand(INTERPRES_CMD_COPY); }
+- (void)onOpenFolder:(id)sender { (void)sender; sendCommand(INTERPRES_CMD_OPEN_FOLDER); }
+- (void)onAuto:(id)sender { (void)sender; sendCommand(INTERPRES_CMD_AUTO); }
+- (void)onMenuItem:(NSMenuItem *)item { g_menu_choice = (int)item.tag; }
 
 @end
 
-static void on_main(void (^block)(void)) {
-    if ([NSThread isMainThread]) {
-        block();
-    } else {
-        dispatch_async(dispatch_get_main_queue(), block);
-    }
-}
+/* ---------- C API ---------- */
 
-int interpres_gui_main(InterpresGuiCallbacks callbacks) {
+int interpres_gui_main(InterpresGuiCallbacks callbacks, int start_minimized) {
     g_cbs = callbacks;
     @autoreleasepool {
         [NSApplication sharedApplication];
-        [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+        NSApp.activationPolicy = NSApplicationActivationPolicyRegular;
         InterpresAppDelegate *del = [[InterpresAppDelegate alloc] init];
-        [NSApp setDelegate:del];
+        del.startMinimized = start_minimized != 0;
+        NSApp.delegate = del;
         [NSApp run];
     }
     return 0;
 }
 
-void interpres_gui_set_status(const char *text) {
-    if (!text)
-        text = "";
-    NSString *s = [NSString stringWithUTF8String:text];
-    on_main(^{
-      if (g_status)
-          [g_status setStringValue:s];
-    });
+void interpres_gui_set_title(const char *text) {
+    NSString *s = str(text);
+    if (g_window && ![g_window.title isEqualToString:s])
+        g_window.title = s;
 }
 
-static void scroll_textview_to_end(NSTextView *tv) {
-    if (!tv)
-        return;
-    NSString *str = [tv string] ?: @"";
-    NSRange end = NSMakeRange([str length], 0);
-    [tv scrollRangeToVisible:end];
-    NSScrollView *sv = [tv enclosingScrollView];
-    if (sv) {
-        NSView *doc = [sv documentView];
-        if (doc) {
-            NSRect docRect = [doc frame];
-            NSRect clip = [[sv contentView] bounds];
-            CGFloat y = NSMaxY(docRect) - NSHeight(clip);
-            if (y < 0)
-                y = 0;
-            [[sv contentView] scrollToPoint:NSMakePoint(0, y)];
-            [sv reflectScrolledClipView:[sv contentView]];
-        }
+void interpres_gui_set_banner(const char *head, const char *guidance, int tone) {
+    NSString *h = str(head), *d = str(guidance);
+    if (![g_bannerHead.stringValue isEqualToString:h])
+        g_bannerHead.stringValue = h;
+    if (![g_bannerDetail.stringValue isEqualToString:d])
+        g_bannerDetail.stringValue = d;
+    if (tone != g_tone) {
+        g_tone = tone;
+        paintBanner();
     }
 }
 
-void interpres_gui_set_live_text(const char *text) {
-    if (!text)
-        text = "";
-    NSString *s = [NSString stringWithUTF8String:text];
-    on_main(^{
-      if (g_live) {
-          [g_live setString:s];
-          scroll_textview_to_end(g_live);
-      }
-    });
+void interpres_gui_set_toggle(const char *label, int enabled, int recording) {
+    NSString *s = str(label);
+    BOOL dirty = NO;
+    if (![g_toggle.title isEqualToString:s]) {
+        g_toggle.title = s;
+        dirty = YES;
+    }
+    if (g_toggle.enabled != (enabled != 0)) {
+        g_toggle.enabled = enabled != 0;
+        dirty = YES;
+    }
+    if (g_recording != recording) {
+        g_recording = recording;
+        g_toggle.fill = recording ? colProblem() : colRecording();
+        dirty = YES;
+    }
+    if (dirty)
+        [g_toggle setNeedsDisplay:YES];
 }
 
-void interpres_gui_append_history(const char *line) {
-    if (!line)
-        return;
-    NSString *s = [NSString stringWithUTF8String:line];
-    on_main(^{
-      if (!g_history)
-          return;
-      NSString *cur = [g_history string] ?: @"";
-      if ([cur length] == 0)
-          [g_history setString:s];
-      else
-          [g_history setString:[cur stringByAppendingFormat:@"\n%@", s]];
-      /* Always stick to the latest line */
-      scroll_textview_to_end(g_history);
-    });
+void interpres_gui_set_action(const char *label) {
+    NSString *s = str(label);
+    BOOL hide = s.length == 0;
+    if (g_action.hidden != hide)
+        g_action.hidden = hide;
+    if (!hide && ![g_action.title isEqualToString:s]) {
+        g_action.title = s;
+        [g_action setNeedsDisplay:YES];
+    }
 }
 
-void interpres_gui_clear_history(void) {
-    on_main(^{
-      if (g_history)
-          [g_history setString:@""];
-    });
+static void setLabel(NSTextField *t, const char *text) {
+    NSString *s = str(text);
+    if (t && ![t.stringValue isEqualToString:s])
+        t.stringValue = s;
 }
 
-void interpres_gui_set_folder(const char *path) {
-    if (!path)
-        path = "";
-    NSString *s = [NSString stringWithFormat:@"Folder: %s", path];
-    on_main(^{
-      if (g_folder)
-          [g_folder setStringValue:s];
-    });
+void interpres_gui_set_checks(const char *text) { setLabel(g_checks, text); }
+void interpres_gui_set_detail(const char *text) { setLabel(g_detail, text); }
+void interpres_gui_set_footer(const char *text) { setLabel(g_file, text); }
+
+void interpres_gui_set_enabled(int open_file, int copy) {
+    if (g_openFile.enabled != (open_file != 0))
+        g_openFile.enabled = open_file != 0;
+    if (g_copy.enabled != (copy != 0))
+        g_copy.enabled = copy != 0;
 }
 
-void interpres_gui_set_remember(int on) {
-    on_main(^{
-      if (!g_rememberBtn)
-          return;
-      if (on)
-          [g_rememberBtn setTitle:@"Save to disk: ON"];
-      else
-          [g_rememberBtn setTitle:@"Save to disk: OFF"];
-      styleButton(g_rememberBtn);
-    });
-}
-
-void interpres_gui_set_debug(int on) {
-    on_main(^{
-      if (!g_debugBtn)
-          return;
-      if (on)
-          [g_debugBtn setTitle:@"Debug: ON"];
-      else
-          [g_debugBtn setTitle:@"Debug: OFF"];
-      styleButton(g_debugBtn);
-    });
+void interpres_gui_set_auto(int on) {
+    NSControlStateValue v = on ? NSControlStateValueOn : NSControlStateValueOff;
+    if (g_auto.state != v)
+        g_auto.state = v;
 }
 
 void interpres_gui_set_theme(int mode) {
-    int m = (mode < 0 || mode > 2) ? 0 : mode;
-    on_main(^{
-      g_theme_mode = m;
-      applyForcedAppearance();
-    });
+    g_theme_mode = (mode < 0 || mode > 2) ? 0 : mode;
+    applyAppearance();
 }
 
-void interpres_gui_set_listening(int on) {
-    on_main(^{
-      if (g_startBtn)
-          [g_startBtn setEnabled:!on];
-      if (g_stopBtn)
-          [g_stopBtn setEnabled:on];
-      styleButton(g_startBtn);
-      styleButton(g_stopBtn);
-    });
+int interpres_gui_is_dark(void) { return effectiveIsDark() ? 1 : 0; }
+
+void interpres_gui_transcript_replace_tail(long start, const char *tail) {
+    if (!g_transcript)
+        return;
+    NSTextStorage *ts = g_transcript.textStorage;
+    NSUInteger len = ts.length;
+    NSUInteger from = start < 0 ? 0 : MIN((NSUInteger)start, len);
+    NSClipView *clip = g_transcriptScroll.contentView;
+    NSRect visible = clip.documentVisibleRect;
+    BOOL atBottom = NSMaxY(visible) >= NSHeight(g_transcript.frame) - 24;
+    NSPoint keep = clip.bounds.origin;
+
+    NSAttributedString *add = [[NSAttributedString alloc] initWithString:str(tail)
+                                                              attributes:transcriptAttrs()];
+    [ts beginEditing];
+    [ts replaceCharactersInRange:NSMakeRange(from, len - from) withAttributedString:add];
+    [ts endEditing];
+
+    if (atBottom) {
+        [g_transcript scrollRangeToVisible:NSMakeRange(ts.length, 0)];
+    } else {
+        [clip scrollToPoint:keep];
+        [g_transcriptScroll reflectScrolledClipView:clip];
+    }
 }
 
-void interpres_gui_set_session_file(const char *path) {
-    if (!path)
-        path = "";
-    NSString *s = path[0] ? [NSString stringWithFormat:@"Saving to file: %s", path]
-                          : @"";
-    on_main(^{
-      if (g_session)
-          [g_session setStringValue:s];
-    });
+int interpres_gui_show_menu(const InterpresMenuItem *items, int count) {
+    if (!g_settings || !items || count <= 0)
+        return 0;
+    NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Settings"];
+    menu.autoenablesItems = NO;
+    id target = NSApp.delegate;
+    for (int i = 0; i < count; i++) {
+        if (items[i].id == 0) {
+            [menu addItem:[NSMenuItem separatorItem]];
+            continue;
+        }
+        NSMenuItem *mi = [[NSMenuItem alloc] initWithTitle:str(items[i].title)
+                                                    action:@selector(onMenuItem:)
+                                             keyEquivalent:@""];
+        mi.target = target;
+        mi.tag = items[i].id;
+        mi.state = items[i].checked ? NSControlStateValueOn : NSControlStateValueOff;
+        mi.enabled = items[i].enabled != 0;
+        [menu addItem:mi];
+    }
+    g_menu_choice = 0;
+    NSPoint below = NSMakePoint(0, NSHeight(g_settings.bounds) + 4);
+    if (!g_settings.isFlipped)
+        below.y = -4;
+    [menu popUpMenuPositioningItem:nil atLocation:below inView:g_settings];
+    return g_menu_choice;
+}
+
+void interpres_gui_attention(int critical) {
+    if (critical) {
+        [NSApp requestUserAttention:NSCriticalRequest];
+        NSSound *s = [NSSound soundNamed:@"Basso"];
+        if (s)
+            [s play];
+        else
+            NSBeep();
+    } else {
+        [NSApp requestUserAttention:NSInformationalRequest];
+        NSSound *s = [NSSound soundNamed:@"Glass"];
+        if (s)
+            [s play];
+        else
+            NSBeep();
+    }
+}
+
+int interpres_gui_copy_text(const char *text) {
+    NSPasteboard *pb = NSPasteboard.generalPasteboard;
+    [pb clearContents];
+    return [pb setString:str(text) forType:NSPasteboardTypeString] ? 1 : 0;
 }
 
 int interpres_gui_pick_folder(char *buf, int buflen) {
     if (!buf || buflen < 2)
         return 0;
     buf[0] = 0;
-    __block int ok = 0;
-    void (^pick)(void) = ^{
-      NSOpenPanel *panel = [NSOpenPanel openPanel];
-      [panel setCanChooseFiles:NO];
-      [panel setCanChooseDirectories:YES];
-      [panel setAllowsMultipleSelection:NO];
-      [panel setCanCreateDirectories:YES];
-      [panel setMessage:@"Choose where Interpres should save transcript files"];
-      [panel setPrompt:@"Use this folder"];
-      if ([panel runModal] == NSModalResponseOK) {
-          NSURL *url = [[panel URLs] firstObject];
-          if (url) {
-              const char *p = [[url path] UTF8String];
-              if (p) {
-                  strncpy(buf, p, (size_t)buflen - 1);
-                  buf[buflen - 1] = 0;
-                  ok = 1;
-              }
-          }
-      }
-    };
-    if ([NSThread isMainThread]) {
-        pick();
-    } else {
-        dispatch_sync(dispatch_get_main_queue(), pick);
-    }
-    return ok;
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.canChooseFiles = NO;
+    panel.canChooseDirectories = YES;
+    panel.allowsMultipleSelection = NO;
+    panel.canCreateDirectories = YES;
+    panel.message = @"Choose where Interpres should save transcript files";
+    panel.prompt = @"Use this folder";
+    if ([panel runModal] != NSModalResponseOK)
+        return 0;
+    const char *p = panel.URLs.firstObject.path.UTF8String;
+    if (!p)
+        return 0;
+    strncpy(buf, p, (size_t)buflen - 1);
+    buf[buflen - 1] = 0;
+    return 1;
 }

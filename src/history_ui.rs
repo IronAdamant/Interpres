@@ -32,6 +32,10 @@ pub enum FamilyPlan {
     /// `remove` is non-empty when Live Captions merged earlier sentences into this one
     /// ("A." + "B." → "A B."); the merged line keeps the earliest position and time.
     Replace { at: usize, remove: Vec<usize> },
+    /// Set line `at` to `text` (the caption joined onto that line). Live Captions split
+    /// one sentence across two lines: "it will help with the" + "will help with the
+    /// supply of that.", or "…besides gaming." + "on a long-term trend.".
+    Join { at: usize, text: String },
 }
 
 /// Decide how `text` applies to `lines` (oldest → newest). Shared by the transcript
@@ -54,7 +58,10 @@ pub fn plan_family<S: AsRef<str>>(lines: &[S], text: &str) -> FamilyPlan {
             })
         });
     let Some(idx) = idx else {
-        return FamilyPlan::Append;
+        return match lines.last().and_then(|last| join_split(last.as_ref(), text)) {
+            Some(joined) => FamilyPlan::Join { at: n - 1, text: joined },
+            None => FamilyPlan::Append,
+        };
     };
     let existing = lines[idx].as_ref();
     if existing == text || !prefer_saved(existing, text) {
@@ -79,6 +86,88 @@ pub fn plan_family<S: AsRef<str>>(lines: &[S], text: &str) -> FamilyPlan {
     absorbed.sort_unstable();
     let at = absorbed.remove(0);
     FamilyPlan::Replace { at, remove: absorbed }
+}
+
+/// A joined line never grows past this many characters (a run of continuations would
+/// otherwise become one paragraph).
+const JOIN_MAX_CHARS: usize = 320;
+
+/// Words of `s` as (original, normalized) pairs; tokens with no letters or digits are
+/// kept with the word before them so the original text is rebuilt faithfully.
+fn words(s: &str) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for tok in s.split_whitespace() {
+        let norm: String = tok
+            .chars()
+            .filter(|c| c.is_alphanumeric() || *c == '\'')
+            .flat_map(char::to_lowercase)
+            .collect();
+        match out.last_mut() {
+            Some(last) if norm.is_empty() => {
+                last.0.push(' ');
+                last.0.push_str(tok);
+            }
+            _ => out.push((tok.to_string(), norm)),
+        }
+    }
+    out
+}
+
+/// Line words `a` and caption words `b` mean the same word; the line's last word may
+/// have been cut mid-word ("penetra" → "penetrated").
+fn same_word(a: &str, b: &str, line_end: bool) -> bool {
+    a == b || (line_end && a.len() >= 3 && b.starts_with(a))
+}
+
+/// `text` starts by repeating the end of `line`: index of the line word where the
+/// repeat begins. The first two words must match exactly, and at least 80% of the
+/// rest (Live Captions polishes a word or two while re-showing).
+fn tail_overlap(line: &[(String, String)], text: &[(String, String)]) -> Option<usize> {
+    let n = line.len();
+    (0..n.saturating_sub(1)).find(|&p| {
+        let len = n - p;
+        if len < 2 || len > text.len() || line[p].1 != text[0].1 || line[p + 1].1 != text[1].1 {
+            return false;
+        }
+        let same = (0..len)
+            .filter(|&i| same_word(&line[p + i].1, &text[i].1, p + i == n - 1))
+            .count();
+        same * 5 >= len * 4
+    })
+}
+
+/// Join a caption onto the line before it when Live Captions split one sentence.
+/// Returns the joined line, or None when `text` is a new line.
+fn join_split(line: &str, text: &str) -> Option<String> {
+    // Only a lowercase start continues the line before: Live Captions starts each
+    // sentence with a capital, and a capitalised repeat ("There a lot of great" →
+    // "A lot of great engineers.") is it restarting the sentence, which the family
+    // match handles. "iPhone"-style words are not continuations.
+    let mut chars = text.chars();
+    let first = chars.next()?;
+    let second = chars.next().unwrap_or(' ');
+    if !first.is_lowercase() || second.is_uppercase() {
+        return None;
+    }
+    let (lw, tw) = (words(line), words(text));
+    if lw.is_empty() || tw.is_empty() {
+        return None;
+    }
+    // "it will help with the" + "will help with the supply of that.": drop the repeat.
+    if let Some(p) = tail_overlap(&lw, &tw) {
+        let head: Vec<&str> = lw[..p].iter().map(|w| w.0.as_str()).collect();
+        return Some(if head.is_empty() {
+            text.to_string()
+        } else {
+            format!("{} {text}", head.join(" "))
+        });
+    }
+    if line.len() + text.len() + 1 > JOIN_MAX_CHARS {
+        return None;
+    }
+    // The full stop (or "?") before it was Live Captions guessing a sentence end.
+    let head = line.trim_end().trim_end_matches(['.', '?', '!']);
+    Some(format!("{head} {text}"))
 }
 
 /// For lines already saved: a version that repeats every word and adds two or more wins
@@ -122,6 +211,7 @@ pub fn apply_plan<T>(
             side.push(new_side());
         }
         FamilyPlan::NoOp => {}
+        FamilyPlan::Join { at, text } => lines[at] = text,
         FamilyPlan::Replace { at, remove } => {
             lines[at] = text.to_string();
             for &i in remove.iter().rev() {
@@ -334,8 +424,50 @@ mod tests {
         }
         assert_eq!(history_apply_final(&h, "Yeah, that makes sense.").0.len(), h.len() + 1);
     }
+
+    // Field run 2026-10-09 (Mac, 3 h): Live Captions split sentences across lines.
+    #[test]
+    fn split_sentence_is_joined() {
+        let join = |line: &str, text: &str| match plan_family(&[line], text) {
+            FamilyPlan::Join { at: 0, text } => Some(text),
+            _ => None,
+        };
+        // The new line repeats the end of the last one.
+        assert_eq!(
+            join("it will help with the", "will help with the supply of that.").as_deref(),
+            Some("it will help with the supply of that.")
+        );
+        assert_eq!(
+            join("It's obvious you", "obvious you should choose that.").as_deref(),
+            Some("It's obvious you should choose that.")
+        );
+        // The rest of a sentence Live Captions closed too early.
+        assert_eq!(
+            join(
+                "And it's like, everything's going down pretty much besides gaming.",
+                "on a long-term trend."
+            )
+            .as_deref(),
+            Some("And it's like, everything's going down pretty much besides gaming on a long-term trend.")
+        );
+        assert_eq!(join("Any questions?", "so far?").as_deref(), Some("Any questions so far?"));
+    }
+
+    #[test]
+    fn capitalised_line_is_not_joined() {
+        // Live Captions restarting the sentence (dropping a misheard word) stays a
+        // family rewrite, never "There A lot of great engineers.".
+        assert!(!matches!(
+            plan_family(&["There a lot of great"], "A lot of great engineers."),
+            FamilyPlan::Join { .. }
+        ));
+        assert_eq!(plan_family(&["We can meet on Thursday."], "I'll send the invite."), FamilyPlan::Append);
+        assert_eq!(plan_family(&["Let me check."], "iPhone sales were up."), FamilyPlan::Append);
+    }
+
+    #[test]
+    fn joined_lines_stay_readable_length() {
+        let long = "word ".repeat(70);
+        assert_eq!(plan_family(&[long.trim()], "and then some more words here."), FamilyPlan::Append);
+    }
 }
-
-
-
-

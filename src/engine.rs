@@ -27,6 +27,9 @@ const STOP_DRAIN_MAX: Duration = Duration::from_millis(2500);
 const STOP_DRAIN_SETTLED: Duration = Duration::from_millis(900);
 /// Wait this long before restarting an external engine that failed or exited.
 const ENGINE_RESTART_BACKOFF: Duration = Duration::from_secs(5);
+/// Re-inject short lines a reader dropped. macOS reads every caption line in screen
+/// order, so there is nothing to re-inject (re-injecting scrambled the line order).
+const USE_SHORT_HOLD: bool = !cfg!(target_os = "macos");
 /// Log polls slower than this (field failure: polls stretched to ~27 s unnoticed).
 const SLOW_POLL_LOG: Duration = Duration::from_millis(2000);
 
@@ -414,15 +417,19 @@ fn run_loop(inner: Arc<EngineInner>, tx: Sender<EngineEvent>) {
             }
 
             // Short-line hold from picked surface (merge pick already joins multi-line siblings).
-            let hold_inputs: Vec<String> = snap
-                .surface_text
-                .iter()
-                .cloned()
-                .collect();
+            let hold_inputs: Vec<String> = if USE_SHORT_HOLD {
+                snap.surface_text.iter().cloned().collect()
+            } else {
+                Vec::new()
+            };
             let _held = short_hold.on_poll(&hold_inputs, |t| buffer.is_covered(t));
 
             if let Some(ref raw_surface) = snap.surface_text {
-                let surface = short_hold.inject_into_surface(raw_surface);
+                let surface = if USE_SHORT_HOLD {
+                    short_hold.inject_into_surface(raw_surface)
+                } else {
+                    raw_surface.clone()
+                };
                 let tick =
                     surface_tr.on_surface(&surface, buffer.is_covered(&surface));
 

@@ -138,6 +138,23 @@ impl TranscriptWriter {
         match plan_family(&bodies, &text) {
             FamilyPlan::Append => self.append_caption(clock_hhmmss, &text),
             FamilyPlan::NoOp => Ok(()),
+            FamilyPlan::Join { at, text: joined } => {
+                let at = tail[at];
+                let clock = caption_clock(&self.lines[at]).unwrap_or(clock_hhmmss).to_string();
+                self.lines[at] = format!("[{clock}] {joined}");
+                self.rewrite_from(at)?;
+                if let Some(ref mut j) = self.jsonl {
+                    let esc = json_escape(&joined);
+                    let src = json_escape(&self.source_label);
+                    writeln!(
+                        j,
+                        "{{\"v\":1,\"t\":\"{clock_hhmmss}\",\"kind\":\"revised\",\"src\":\"{src}\",\"text\":\"{esc}\"}}"
+                    )?;
+                    j.flush()?;
+                }
+                self.refresh_last_final();
+                Ok(())
+            }
             FamilyPlan::Replace { at, remove } => {
                 let at = tail[at];
                 // Keep the time the line was first heard; a later polish must not move it.
@@ -529,5 +546,57 @@ mod tests {
         );
         assert!(on_disk.contains("# [10:00:02] Live Captions back on"));
         let _ = fs::remove_dir_all(dir);
+    }
+
+    /// Replays a session's `.debug.log` caption events through the writer and prints
+    /// line / repeat counts (compare with the real `.txt`):
+    /// `INTERPRES_REPLAY=/path/x.debug.log cargo test --lib replay_debug_log -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn replay_debug_log() {
+        let Some(log) = std::env::var_os("INTERPRES_REPLAY") else {
+            return;
+        };
+        let text = fs::read_to_string(&log).expect("read debug log");
+        let dir = std::env::temp_dir().join(format!("interpres-replay-{}", std::process::id()));
+        let mut w = TranscriptWriter::begin_session(&dir, true, false, "replay", SystemTime::now())
+            .unwrap()
+            .unwrap();
+        let mut events = 0;
+        for line in text.lines() {
+            let Some(rest) = line.split_once("] ").map(|(_, r)| r) else {
+                continue;
+            };
+            if let Some(t) = rest.strip_prefix("FINAL ") {
+                w.write_final("00:00:00", t).unwrap();
+                events += 1;
+            } else if let Some(t) = rest.strip_prefix("REVISED ") {
+                w.write_revised("00:00:00", t).unwrap();
+                events += 1;
+            }
+        }
+        let out = fs::read_to_string(w.txt_path()).unwrap();
+        let captions: Vec<&str> = out
+            .lines()
+            .filter(|l| l.starts_with('['))
+            .map(|l| l.split_once("] ").map_or(l, |(_, t)| t))
+            .collect();
+        let mut seen = std::collections::HashSet::new();
+        let repeats = captions.iter().filter(|c| !seen.insert(**c)).count();
+        let lowercase = captions
+            .iter()
+            .filter(|c| c.chars().next().is_some_and(|ch| ch.is_lowercase()))
+            .count();
+        let open = captions
+            .iter()
+            .filter(|c| !c.ends_with(['.', '?', '!']))
+            .count();
+        let words: usize = captions.iter().map(|c| c.split_whitespace().count()).sum();
+        let longest = captions.iter().map(|c| c.len()).max().unwrap_or(0);
+        println!(
+            "events={events} lines={} repeats={repeats} lowercase_start={lowercase} no_end_punct={open} words={words} longest={longest} file={}",
+            captions.len(),
+            w.txt_path().display()
+        );
     }
 }

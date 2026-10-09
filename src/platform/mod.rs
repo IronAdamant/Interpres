@@ -15,6 +15,15 @@ mod windows_uia;
 #[cfg(windows)]
 pub mod windows_audio;
 
+#[cfg(target_os = "macos")]
+pub mod macos_audio;
+
+/// Speaker activity for auto-record (same API on both OSes).
+#[cfg(windows)]
+pub use windows_audio as sound;
+#[cfg(target_os = "macos")]
+pub use macos_audio as sound;
+
 pub use detect::{live_captions_present, LiveCaptionsPresence};
 pub use signals::{macos_signals, windows_signals, SignalTable};
 
@@ -38,6 +47,33 @@ pub fn shutdown_capture() {
     #[cfg(windows)]
     {
         windows::shutdown_reader();
+    }
+}
+
+/// Switch Live Captions on. Windows starts it; macOS only lets the user switch it on, so
+/// this opens its page in System Settings.
+#[cfg(any(windows, target_os = "macos"))]
+pub fn launch_live_captions() -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        windows::launch_live_captions()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos::open_live_captions_settings()
+    }
+}
+
+/// Close Live Captions and start it again (the transcript file continues).
+#[cfg(any(windows, target_os = "macos"))]
+pub fn restart_live_captions() -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        windows::restart_live_captions()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos::restart_live_captions()
     }
 }
 

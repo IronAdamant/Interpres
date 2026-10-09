@@ -79,6 +79,11 @@ impl Health {
     }
 }
 
+/// macOS refused to let Interpres read Live Captions (Accessibility permission off).
+fn is_permission_error(e: &str) -> bool {
+    e.contains("Accessibility is OFF")
+}
+
 /// Tracks poll outcomes and reports `Health` changes.
 #[derive(Clone, Debug, Default)]
 pub struct HealthMonitor {
@@ -110,9 +115,11 @@ impl HealthMonitor {
         } else if has_text {
             self.failing_since_ms = None;
             Health::Recording
-        } else if error.is_some() {
+        } else if let Some(e) = error {
             let since = *self.failing_since_ms.get_or_insert(now_ms);
-            if now_ms.saturating_sub(since) >= NOT_READING_AFTER_MS {
+            // A missing permission never fixes itself: say so at once, not after 6 s of
+            // "waiting for speech".
+            if is_permission_error(e) || now_ms.saturating_sub(since) >= NOT_READING_AFTER_MS {
                 Health::NotReading
             } else {
                 // Short blip: keep the last state; LC just (re)appeared → waiting.
@@ -192,6 +199,16 @@ impl IdlePrompt {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_permission_is_not_reading_at_once() {
+        let mut m = HealthMonitor::new();
+        let err = "macOS Accessibility is OFF for this copy of Interpres.";
+        assert_eq!(m.on_poll(0, true, false, Some(err)), Some(Health::NotReading));
+        // A passing read error still waits before alarming.
+        let mut m = HealthMonitor::new();
+        assert_eq!(m.on_poll(0, true, false, Some("timeout")), Some(Health::WaitingForSpeech));
+    }
 
     #[test]
     fn waiting_for_speech_is_not_an_error() {
