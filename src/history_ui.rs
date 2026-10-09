@@ -2,7 +2,10 @@
 //!
 //! Family-aware: polish of an earlier line updates that row, not only the last row.
 
-use crate::buffer::{normalize_for_cmp, number_skeleton, prefer_polish, same_or_refinement, skeleton_overlaps};
+use crate::buffer::{
+    extends_by_words, normalize_for_cmp, number_skeleton, prefer_polish, same_or_refinement,
+    skeleton_overlaps,
+};
 
 /// Default scan depth for same-family matches (matches transcript ring K).
 pub const HISTORY_FAMILY_K: usize = crate::buffer::RECENT_FAMILY_K;
@@ -11,8 +14,12 @@ pub const HISTORY_FAMILY_K: usize = crate::buffer::RECENT_FAMILY_K;
 pub const STRONG_REPEAT_K: usize = 20;
 /// Letters a far-back repeat must share (a short "Yeah, that makes sense." stays new).
 const STRONG_REPEAT_MIN: usize = 40;
-/// A merged polish only absorbs earlier lines at least this long (normalized chars).
+/// A merged polish only absorbs earlier lines at least this long (normalized chars),
+/// unless it starts with that line (a stub like "years and" right before it).
 const ABSORB_MIN: usize = 12;
+/// An identical line this many words or longer, within `STRONG_REPEAT_K`, is Live
+/// Captions re-showing it (seen ~20 s later, 9 lines on); shorter replies stay new.
+const SAME_LINE_MIN_WORDS: usize = 5;
 
 /// How a caption changes the recent lines.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -38,20 +45,27 @@ pub fn plan_family<S: AsRef<str>>(lines: &[S], text: &str) -> FamilyPlan {
         .rev()
         .find(|&i| same_or_refinement(lines[i].as_ref(), text))
         .or_else(|| {
-            (far..near)
-                .rev()
-                .find(|&i| skeleton_overlaps(lines[i].as_ref(), text, STRONG_REPEAT_MIN))
+            let key = normalize_for_cmp(text);
+            let long_enough = key.split(' ').count() >= SAME_LINE_MIN_WORDS;
+            (far..near).rev().find(|&i| {
+                let line = lines[i].as_ref();
+                skeleton_overlaps(line, text, STRONG_REPEAT_MIN)
+                    || (long_enough && normalize_for_cmp(line) == key)
+            })
         });
     let Some(idx) = idx else {
         return FamilyPlan::Append;
     };
     let existing = lines[idx].as_ref();
-    if existing == text || !prefer_polish(existing, text) {
+    if existing == text || !prefer_saved(existing, text) {
         return FamilyPlan::NoOp;
     }
     // Lines directly before the match that the text repeats in full.
     let mut keep = idx;
-    while keep > far && contains_line(text, lines[keep - 1].as_ref(), ABSORB_MIN) {
+    while keep > far
+        && (contains_line(text, lines[keep - 1].as_ref(), ABSORB_MIN)
+            || starts_with_line(text, lines[keep - 1].as_ref()))
+    {
         keep -= 1;
     }
     let mut absorbed: Vec<usize> = (keep..idx).collect();
@@ -65,6 +79,21 @@ pub fn plan_family<S: AsRef<str>>(lines: &[S], text: &str) -> FamilyPlan {
     absorbed.sort_unstable();
     let at = absorbed.remove(0);
     FamilyPlan::Replace { at, remove: absorbed }
+}
+
+/// For lines already saved: a version that repeats every word and adds two or more wins
+/// even without a full stop. Live Captions saved "We'll see though." then sent "We'll see
+/// though there's always repercussions"; the caption buffer's full-stop bonus dropped the
+/// extra words. (The buffer itself keeps the stricter rule: mid-stream, those extra words
+/// are often the next sentence glued on.)
+fn prefer_saved(existing: &str, candidate: &str) -> bool {
+    extends_by_words(existing, candidate, 2) || prefer_polish(existing, candidate)
+}
+
+/// `text` begins with every word of `line` ("years and" → "years and I am still…").
+fn starts_with_line(text: &str, line: &str) -> bool {
+    let (t, l) = (normalize_for_cmp(text), normalize_for_cmp(line));
+    !l.is_empty() && (t == l || t.starts_with(&format!("{l} ")))
 }
 
 /// `text` repeats all of `line` (ignoring case, punctuation and number style), and the
@@ -271,6 +300,42 @@ mod tests {
         h = history_apply_final(&h, "OK. Fine, let's go.").0;
         assert_eq!(h.len(), 3);
     }
+
+    #[test]
+    fn longer_version_of_a_finished_line_keeps_its_extra_words() {
+        // From the 3-hour run: these words were lost.
+        let h = vec!["We'll see though.".to_string()];
+        let (out, _) = history_apply_revised(&h, "We'll see though there's always repercussions");
+        assert_eq!(out, vec!["We'll see though there's always repercussions".to_string()]);
+        // One extra word is still a draft: the finished line stays.
+        let h = vec!["We can meet on Thursday.".to_string()];
+        assert_eq!(history_apply_revised(&h, "We can meet on Thursday if").0, h);
+    }
+
+    #[test]
+    fn stub_right_before_its_full_line_is_absorbed() {
+        // 3-hour run: "years and" saved, then the sentence arrived via another line.
+        let mut h = vec!["years and".to_string(), "And I am still not to my next goal on patreon once I get".to_string()];
+        h = history_apply_revised(&h, "years and I am still not to my next goal on Patreon.").0;
+        assert_eq!(h, vec!["years and I am still not to my next goal on Patreon.".to_string()]);
+    }
+
+    #[test]
+    fn identical_line_reshown_a_little_later_is_not_repeated() {
+        let mut h = vec!["Australia is up there too.".to_string()];
+        for i in 0..8 {
+            h.push(format!("Some other sentence number {i} here."));
+        }
+        assert_eq!(history_apply_final(&h, "Australia is up there too.").0.len(), h.len());
+        // A short reply repeated that far on is a new line.
+        let mut h = vec!["Yeah, that makes sense.".to_string()];
+        for i in 0..8 {
+            h.push(format!("Some other sentence number {i} here."));
+        }
+        assert_eq!(history_apply_final(&h, "Yeah, that makes sense.").0.len(), h.len() + 1);
+    }
 }
+
+
 
 

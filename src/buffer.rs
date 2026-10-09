@@ -1189,6 +1189,12 @@ pub fn same_or_refinement(a: &str, b: &str) -> bool {
     if skeleton_overlaps(a, b, SKELETON_MIN) {
         return true;
     }
+    // Identical once numbers are ignored: a shorter line is enough ("an eighty eight
+    // hundred, right from NVIDIA." ↔ "an 8800, right from NVIDIA.").
+    let (sa, sb) = (number_skeleton(a), number_skeleton(b));
+    if sa.len() >= SKELETON_SAME_MIN && sa == sb {
+        return true;
+    }
 
     let ta: Vec<&str> = na.split_whitespace().collect();
     let tb: Vec<&str> = nb.split_whitespace().collect();
@@ -1250,6 +1256,8 @@ pub fn same_or_refinement(a: &str, b: &str) -> bool {
 
 /// Shortest skeleton (letters, number words removed) trusted for a number-style match.
 const SKELETON_MIN: usize = 20;
+/// Shortest skeleton trusted when the two skeletons are identical.
+const SKELETON_SAME_MIN: usize = 10;
 
 const NUMBER_WORDS: &[&str] = &[
     "zero", "oh", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
@@ -1264,13 +1272,17 @@ const NUMBER_WORDS: &[&str] = &[
 pub fn number_skeleton(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut after_number = false;
-    for word in s.split(|c: char| !c.is_alphanumeric()) {
-        if word.is_empty() {
-            continue;
-        }
-        let lower = word.to_lowercase();
-        let is_number = NUMBER_WORDS.contains(&lower.as_str())
-            || lower.chars().all(|c| c.is_ascii_digit());
+    let tokens: Vec<String> = s
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(|w| w.to_lowercase())
+        .collect();
+    let is_num = |w: &str| NUMBER_WORDS.contains(&w) || w.chars().all(|c| c.is_ascii_digit());
+    for (i, lower) in tokens.iter().enumerate() {
+        let lower = lower.as_str();
+        let is_number = is_num(lower)
+            // "a hundred forty dollars" ↔ "$140": the "a" belongs to the number.
+            || (lower == "a" && tokens.get(i + 1).is_some_and(|n| is_num(n)));
         // "two hundred and fifty" ↔ "250": the "and" belongs to the number.
         if is_number || (after_number && lower == "and") {
             after_number = true;
@@ -1347,7 +1359,7 @@ pub fn prefer_polish(existing: &str, candidate: &str) -> bool {
 }
 
 /// `longer` repeats every word of `shorter` (ignoring case/punctuation) and adds `min_extra`+ words.
-fn extends_by_words(shorter: &str, longer: &str, min_extra: usize) -> bool {
+pub(crate) fn extends_by_words(shorter: &str, longer: &str, min_extra: usize) -> bool {
     let a = normalize_for_cmp(shorter);
     let b = normalize_for_cmp(longer);
     let ta: Vec<&str> = a.split_whitespace().collect();
@@ -1378,8 +1390,15 @@ mod tests {
             "They're like MI, four fifty five, X stuff for anything but AI.",
             "They're like MI455X stuff for anything but AI.",
         ));
+        assert!(same_or_refinement("an eighty eight hundred, right from NVIDIA.", "an 8800, right from NVIDIA."));
+        assert!(same_or_refinement("So you got seven minutes seven.", "So you got 7 minutes 7."));
+        assert!(same_or_refinement(
+            "A six gigabyte card for a hundred forty dollars.",
+            "A 6 gigabyte card for $140."
+        ));
         // Short lines that differ only in numbers stay separate.
         assert!(!same_or_refinement("Item four.", "Item five."));
+        assert!(!same_or_refinement("Page two.", "Page 3."));
     }
 
     #[test]
