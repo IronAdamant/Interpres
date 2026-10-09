@@ -4,128 +4,183 @@
   <img src="assets/logo.png" alt="Interpres logo" width="128" height="128" />
 </p>
 
-**Save what Windows Live Captions shows, so you have the words after the meeting.**
+**Save what Live Captions shows, so you have the words after the meeting.**
 
-Interpres is a free helper for people who use **Windows Live Captions**.
-It does **not** listen to your microphone or caption anything itself.
-It reads the text Live Captions already puts on screen and saves it to a plain text file on your PC.
+Live Captions is built into **Windows 11** and **macOS**. It shows what people are saying as text on your screen, but the words disappear once they scroll away. Interpres keeps them: it saves the captions to a plain text file you can read, search and copy later.
 
-No account. No cloud. Everything stays on your computer unless **you** move the files.
+It's useful if you're Deaf or hard of hearing, find speech hard to follow, or are working in a second language. It's also handy for anyone who wants notes from a call or video.
+
+- **Free** and open source
+- **No account, no cloud.** Everything stays on your computer.
+- **Doesn't listen to anything itself.** It only saves what Live Captions already shows.
 
 <p align="center">
-  <img src="assets/screenshot-windows.png" alt="Interpres recording a meeting: green Recording banner, Stop button, checklist, and a transcript with times" width="720" />
+  <img src="assets/screenshot-windows.png" alt="Interpres on Windows recording a meeting: green Recording banner, Stop button, checklist, and a transcript with times" width="49%" />
+  <img src="assets/screenshot-macos.png" alt="Interpres on Mac recording a meeting: green Recording banner, Stop button, checklist, and a transcript with times" width="49%" />
+  <br />
+  <em>Windows (left) and Mac (right)</em>
 </p>
 
 ---
 
-## What it is / isn’t
+## Get started on Windows 11
 
-| Interpres **is** | Interpres **is not** |
-|------------------|----------------------|
-| A local helper that **records** what Live Captions shows | A speech-to-text engine |
-| Able to **save** captions while Live Captions works | A guarantee of perfect words |
-| Loud when it **can’t** read captions, so you know | A replacement for Live Captions |
-
----
-
-## Quick start (Windows 11)
-
-1. **Download** the Windows zip from **[Releases](https://github.com/IronAdamant/Interpres/releases)** and unzip it anywhere.
-2. **Open** `interpres.exe`. There is nothing else to install.
-3. **Live Captions:** if the banner says *Live Captions is off*, press **Turn on Live Captions** (or press **Win + Ctrl + L**).
+1. **Download** the Windows zip from **[Releases](https://github.com/IronAdamant/Interpres/releases)**. Right-click it and choose **Extract All**.
+2. **Open** `interpres.exe` from the extracted folder. There's nothing to install.
+   If Windows says *“Windows protected your PC”*, click **More info**, then **Run anyway**. (Interpres isn't signed with a paid certificate.)
+3. **Turn on Live Captions.** If Interpres says *Live Captions is off*, press **Turn on Live Captions** (or press **Win + Ctrl + L**).
 4. Press **Start recording** before your meeting.
-5. Press **Stop recording** when you’re done. Interpres saves the sentence still being spoken before it closes the file.
+5. Press **Stop recording** when you're done.
 
-Then use **Open transcript** or **Copy all** to move the text into your notes.
-
-Closing the window with **X** also saves: the last sentence is written and the file is closed before Interpres exits.
+That's it. Use **Open transcript** or **Copy all** to put the text in your notes.
 
 ---
 
-## Auto-record (never forget to press Start)
+## Get started on Mac
 
-Tick **Auto-record when sound plays** (top right). Leave Interpres open and:
+For Macs with Apple Silicon (M1 or newer), on macOS 13 or later.
 
-- When a meeting or video plays through your speakers or headset for a few seconds, Interpres **turns on Live Captions** (if it is off) and **starts recording**.
-- When it goes quiet, the usual **“are you done?”** question still appears, and tells you how long until it stops by itself.
-- After **5 minutes with no sound and no new captions**, it **stops and saves** the transcript to your transcripts folder. The file ends with `# Session ended (no sound for 5 min)`.
-- The next time sound plays, a new recording starts. If you press **Stop** while a video is still playing, it waits for a minute of quiet before it auto-starts again.
+1. **Download** the Mac zip from **[Releases](https://github.com/IronAdamant/Interpres/releases)** and double-click it to unzip. Move **Interpres.app** to your Applications folder.
+2. **Open** Interpres.app. The first time, your Mac says it can't check who made it. Go to **System Settings → Privacy & Security**, scroll down and click **Open Anyway**. (Interpres isn't signed with a paid Apple account.)
+3. **Let Interpres read the captions.** Your Mac asks for **Accessibility** permission. Turn on Interpres in the list that opens.
+   *After you update Interpres, switch it off and on again in that list.*
+4. **Turn on Live Captions** in **System Settings → Accessibility → Live Captions**. The **Turn on Live Captions** button in Interpres opens that page for you.
+5. Press **Start recording** before your meeting, and **Stop recording** when you're done.
 
-Auto-record only works while Interpres is open. To keep it ready, tick **Settings ▾ → Start Interpres when Windows starts**: it then opens minimized each time you sign in.
-
-If you close Interpres with **X** by accident, nothing is lost: every line is saved to the file as it arrives, and closing saves the sentence still being spoken.
-
-Interpres only checks **how loud** your speakers are (the same level the Windows volume mixer shows). It never records or keeps any audio. Change the 5 minutes with `auto_stop_quiet_minutes` in the settings file.
+Use **Open transcript** or **Copy all** to put the text in your notes.
 
 ---
 
-## Reading the banner
+## Everyday use
 
-The coloured banner tells you whether your words are being saved. The window title and the taskbar button show the same state.
+### The coloured banner
 
-| Banner | Meaning | What to do |
-|--------|---------|------------|
-| 🟩 **Recording · 12:40 · 48 lines** | Captions are being read and saved | Nothing |
-| 🟦 **Ready — waiting for speech** | Live Captions is on but nobody is talking yet | Nothing |
+The banner at the top tells you whether your words are being saved.
+
+| Banner | What it means | What to do |
+|--------|---------------|------------|
+| 🟩 **Recording · 12:40 · 48 lines** | Captions are being saved | Nothing |
+| 🟦 **Ready — waiting for speech** | Live Captions is on, but nobody is talking yet | Nothing |
 | 🟥 **Live Captions is off** | Nothing can be saved | Press **Turn on Live Captions** |
-| 🟥 **Not capturing — can’t read Live Captions** | Live Captions is stuck; captions are being missed | Press **Restart Live Captions** |
-| 🟧 **No new captions for 3 min — are you done?** | It has gone quiet | **Stop & save**, or **Keep recording** |
+| 🟥 **Not capturing — can't read Live Captions** | Captions are being missed | Press **Restart Live Captions**. On Mac, see [the Mac tip below](#common-questions) |
+| 🟧 **No new captions for 3 min — are you done?** | It has gone quiet | Press **Stop & save** or **Keep recording** |
 
-When the banner turns red, the taskbar button flashes and Windows plays a warning sound, so you notice even when another window is in front.
+When the banner turns red, Interpres also gets your attention: the taskbar button flashes on Windows, the Dock icon bounces on Mac, and a sound plays.
 
-**Interpres never stops recording by itself** unless you tick [Auto-record](#auto-record-never-forget-to-press-start). When it goes quiet, it asks and waits for your answer. You can change the wait (or turn the question off) with `idle_prompt_minutes` in the settings file. See [Settings file](#settings-file).
+Interpres never stops recording on its own (unless you turn on auto-record, below). When things go quiet, it asks you instead.
 
-If Live Captions closes or restarts during a meeting, recording carries on in **the same file** and a note marks the gap.
+If Live Captions closes or restarts during a meeting, Interpres keeps going in the same file.
 
----
+### Auto-record: never forget to press Start
 
-## Your files
+Tick **Auto-record when sound plays** at the top of the window, and leave Interpres open.
 
-Each recording creates one dated text file in your transcripts folder (by default **Documents → Interpres Transcripts**):
+- When a meeting or video starts playing, Interpres **starts recording by itself**. On Windows it also turns Live Captions on if needed.
+- When everything has been quiet for **5 minutes**, it **stops and saves**.
+- The next time something plays, a new recording starts.
 
-```text
-2026-10-08_17-59-54.txt
-```
+Want it ready every day? In **Settings**, turn on **Start Interpres when Windows starts** (on Mac: **Open Interpres at login**). Interpres then opens in the background when you sign in.
+
+Interpres never records sound. On Windows it only checks how loud the speakers are. On Mac it checks that something is playing *and* that Live Captions is showing new words, so keep Live Captions on.
+
+### Your transcripts
+
+Each recording is saved as its own text file in **Documents → Interpres Transcripts**, named with the date and time, like `2026-10-08_17-59-54.txt`. Open it with Notepad, TextEdit or any text editor:
 
 ```text
 # Interpres session started 2026-10-08 17-59-54
 # Source: Windows Live Captions
-# Folder: C:\Users\you\Documents\Interpres Transcripts
 
 [18:04:07] If I unmute myself.
 [18:04:10] How are you?
-# [18:09:12] Live Captions turned off — nothing captured until it is back on
-# [18:09:20] Live Captions back on
 [18:09:24] So that's the premise.
 
 # Session ended (user)
 ```
 
-Times are your local time and show when each line was first heard.
+Each line shows the time it was said. Every line is saved the moment it appears, so closing Interpres by accident doesn't lose anything.
+
+### Settings
+
+Click **Settings** (top right) for these options:
+
+| Option | What it does |
+|--------|--------------|
+| Save transcripts to disk | Turn saving on or off. When off, captions only show in the window |
+| Change transcripts folder / Open transcripts folder | Choose or open where your files go |
+| Start Interpres when Windows starts (Mac: Open Interpres at login) | Opens Interpres in the background when you sign in |
+| Check Live Captions setup | Tests whether Interpres can read Live Captions right now |
+| Restart Live Captions | Fixes Live Captions when it gets stuck |
+| Open Live Captions settings *(Mac)* | Opens the page where you turn Live Captions on |
+| Accessibility permission… *(Mac)* | Opens the list where you allow Interpres to read captions |
+| Theme | Match your computer, light, or dark |
+| Write debug log | Saves a troubleshooting file next to your transcripts. Only needed if something goes wrong |
+
+The other options in the menu (caption source, settings file) are for [advanced use](#advanced).
 
 ---
 
-## Settings ▾
+## Privacy
 
-| Item | What it does |
-|------|--------------|
-| Save transcripts to disk | On/off. When off, captions show in the window but are not kept |
-| Change / Open transcripts folder | Choose or open where files go |
-| Captions from | Windows Live Captions, or your own engine (see below) |
-| Start Interpres when Windows starts | Opens Interpres minimized when you sign in, so auto-record is always ready |
-| Edit settings file… | Opens `settings.conf` in Notepad |
-| Check Live Captions setup | Checks whether Interpres can read Live Captions right now |
-| Restart Live Captions | Closes and reopens Live Captions (fixes a frozen captions window) |
-| Theme | Match Windows, light, or dark |
-| Write debug log | Writes a troubleshooting log next to your transcripts |
+- Your captions and transcripts **stay on your computer**. Interpres never connects to the internet.
+- If you only want captions on screen, turn off **Settings → Save transcripts to disk**, and nothing is kept.
+
+### Saving what other people say
+
+A transcript holds other people's words, not just yours. Before you save a meeting, class or call:
+
+- **Check the rules where you are.** Your workplace, school or the meeting host may have a policy on recording or transcribing. In some places, keeping a record of a conversation needs everyone's consent.
+- **Tell people when it matters.** "I use captions and keep a transcript to follow along" is usually enough, and most people are happy to hear it.
+- **Treat the files like meeting notes.** Keep them private, don't share them without permission, and delete the ones you no longer need.
 
 ---
 
-## Use your own speech engine (advanced)
+## Common questions
 
-Live Captions is the easy option and needs no setup. If you run your own speech-to-text model (for example **Phonon-2**, **Parakeet** or **Whisper**), Interpres can save its output instead, with the same banner, prompts and files.
+**Does it work with Zoom, Teams, Google Meet, YouTube…?**
+Yes. Anything Live Captions can caption, Interpres can save: calls, videos, podcasts, and anything else that plays sound on your computer.
 
-Interpres doesn’t bundle or download any model. You point it at your engine program in the settings file, and the engine prints caption lines that Interpres saves. Interpres itself stays zero-dependency; your engine brings its own. This works on Windows and macOS.
+**Which languages does it support?**
+The same ones as Live Captions on your computer. Interpres saves whatever text Live Captions shows.
+
+**Where are my transcripts?**
+In **Documents → Interpres Transcripts**, or click **Open folder** in Interpres.
+
+**Is it really free?**
+Yes. No ads, no subscription, no account. The code is open source.
+
+**A word in the file is wrong.**
+Live Captions misheard it. Interpres saves exactly what Live Captions showed.
+
+**The banner says “can't read Live Captions”.**
+Press **Restart Live Captions**; recording carries on in the same file.
+**On Mac**, this usually means Interpres lost its Accessibility permission (macOS forgets it after an update). Click **Settings → Accessibility permission…**, switch Interpres off and on again, then reopen Interpres.
+If it keeps happening, turn on **Write debug log** in Settings and keep the `.debug.log` file that appears next to the transcript.
+
+**Does it work on Intel Macs?**
+Not for now. The code is open source, so you can build it yourself.
+
+**Does it work on Linux?**
+No.
+
+---
+
+## Known issues
+
+- Live Captions sometimes changes earlier words after the fact. Interpres keeps the most polished version it sees, but now and then a line is saved twice with small differences, or slightly out of order.
+- Interpres can only save what Live Captions shows. If Live Captions isn't showing anything, the banner says **Ready — waiting for speech** and nothing is being saved.
+
+---
+
+## Advanced
+
+Everything below is optional. You don't need any of it to use Interpres.
+
+### Use your own speech engine
+
+Live Captions is the easy option and needs no setup. If you run your own speech-to-text model (for example **Phonon-2**, **Parakeet** or **Whisper**), Interpres can save its output instead, with the same banner, prompts and files. This works on Windows and Mac.
+
+Interpres doesn't bundle or download any model. You point it at your engine program in the settings file, and the engine prints caption lines that Interpres saves. Interpres itself stays zero-dependency; your engine brings its own.
 
 ```ini
 source=engine
@@ -133,82 +188,11 @@ helper_path=C:\Users\you\AppData\Local\Programs\Python\Python313\python.exe
 helper_args=-u "C:\engines\my_engine.py"
 ```
 
-See **[docs/ENGINES.md](docs/ENGINES.md)** for the line format and a standard-library Python example engine ([`examples/engines/example_engine.py`](examples/engines/example_engine.py)). Switch between Live Captions and your engine under **Settings ▾ → Captions from**.
-
----
-
-## Privacy
-
-- Captions and transcripts stay **on your PC** unless **you** move them.
-- Saving is **on** by default (that’s the point of the app). Turn it off under **Settings ▾ → Save transcripts to disk** to only watch captions in the window.
-- Interpres makes no network connections.
-
----
-
-## Common questions
-
-**A word in the file is wrong.**
-Live Captions misheard it. Interpres saves exactly what Live Captions showed.
-
-**The banner is red and says “can’t read Live Captions”.**
-Press **Restart Live Captions**. Recording carries on in the same file. If it keeps happening, turn on **Write debug log** in Settings and keep the `.debug.log` file that appears next to the transcript.
-
-**Do I need PowerShell or any helper files?**
-No. Interpres reads Live Captions directly through Windows UI Automation. `interpres.exe` is all you need.
-
-**Mac?**
-Yes: macOS 13 or newer, with **Live Captions** (System Settings → Accessibility → Live Captions). The window and features are the same as on Windows, with a few differences:
-
-- macOS doesn't let other apps switch Live Captions on, so **Turn on Live Captions** opens its page in System Settings.
-- Interpres needs **Accessibility** permission to read the captions. Use **Settings ▾ → Accessibility permission…** and turn on Interpres.
-- **Auto-record** starts when an app is playing sound **and** Live Captions is showing new words. macOS can't report speaker loudness without recording audio, so Interpres doesn't measure it.
-- **Settings ▾ → Open Interpres at login** replaces "Start with Windows".
-
-To build the Mac app, run `bash packaging/make-double-click.sh`. This creates `dist/Interpres/Interpres.app`.
-
-**Linux?**
-Not supported.
-
----
-
-## Known issues
-
-- Live Captions sometimes changes earlier words after the fact. Interpres keeps the most polished version it sees, but occasionally a line is saved twice with small differences, or slightly out of order.
-- Interpres can only save what Live Captions shows. If Live Captions isn’t showing anything, the banner says **Ready — waiting for speech** and nothing is being saved.
-
----
-
-## For developers
-
-Rust, zero crates.io dependencies. Native Win32 UI; captions are read in-process through UI Automation COM (`src/platform/windows_uia.rs`) with 1.5 s connect and 2.5 s per-call timeouts and a watchdog.
-
-```text
-cargo test
-cargo build --release
-powershell -NoProfile -ExecutionPolicy Bypass -File packaging\make-windows-release.ps1
-```
-
-The `x86_64-pc-windows-gnu` toolchain needs a MinGW with `libgcc` (for example WinLibs) first on `PATH` to link tests. llvm-mingw alone fails with `unable to find library -lgcc_eh`.
-
-| File | Purpose |
-|------|---------|
-| `src/platform/windows_uia.rs` | Hand-written UI Automation COM bindings |
-| `src/platform/windows.rs` | Reader thread, watchdog, turn on / restart Live Captions |
-| `src/health.rs` | Banner states and the “are you done?” prompt (shared with macOS) |
-| `src/engine.rs` | Capture loop, external-engine loop, session files, end-of-recording drain |
-| `src/plugin_host.rs` | Runs an external engine and reads its protocol lines |
-| `src/buffer.rs` | Turns the rolling caption text into finished lines |
-| `src/app_view.rs` | What the window shows (banner, checklist, transcript rows, auto-record), shared by both UIs |
-| `src/gui_win.rs` | Windows UI |
-| `src/gui.rs`, `native/macos/` | macOS UI (AppKit, compiled by `build.rs` with the system clang) |
-| `src/platform/macos.rs` | Reads Mac Live Captions through Accessibility (2.5 s call timeout), in-process process lookup |
-| `src/platform/macos_audio.rs` | Mac auto-record signal: an app is playing and Live Captions is captioning |
-
-Diagnostics: `interpres diagnose` prints what Interpres can read right now. With Live Captions open, `cargo test --lib dump_live_surface -- --ignored --nocapture` dumps the raw caption text line by line.
+See **[docs/ENGINES.md](docs/ENGINES.md)** for the line format and a standard-library Python example engine ([`examples/engines/example_engine.py`](examples/engines/example_engine.py)). Switch between Live Captions and your engine under **Settings → Captions from**.
 
 ### Settings file
 
-`%APPDATA%\Interpres\settings.conf` on Windows, `~/.config/interpres/settings.conf` on Mac, `key=value` lines:
+**Settings → Edit settings file…** opens it (Notepad on Windows, TextEdit on Mac). It lives at `%APPDATA%\Interpres\settings.conf` on Windows and `~/.config/interpres/settings.conf` on Mac, as `key=value` lines:
 
 | Key | Default | Meaning |
 |-----|---------|---------|
@@ -216,14 +200,51 @@ Diagnostics: `interpres diagnose` prints what Interpres can read right now. With
 | `transcript_folder` | Documents\Interpres Transcripts | Where files go |
 | `idle_prompt_minutes` | `3` | Ask “are you done?” after this many quiet minutes (`0` = never) |
 | `auto_record` | `false` | Start recording when sound plays; same as the **Auto-record** checkbox |
-| `auto_stop_quiet_minutes` | `5` | With auto-record on: stop and save after this many minutes with no sound (`0` = never) |
-| `debug` | `false` | Write `interpres-debug.log` and per-session `.debug.log` |
+| `auto_stop_quiet_minutes` | `5` | With auto-record on: stop and save after this many quiet minutes (`0` = never) |
+| `debug` | `false` | Write `interpres-debug.log` and a `.debug.log` per recording |
 | `theme` | `system` | `system`, `light`, or `dark` |
 | `write_jsonl` | `false` | Also write a machine-readable `.jsonl` next to each transcript |
 | `source` | `os` | `os` = Live Captions, `engine` = your own engine ([docs/ENGINES.md](docs/ENGINES.md)) |
 | `helper_path` | (empty) | Engine program, as a full path |
 | `helper_args` | (empty) | Engine arguments; double quotes group paths with spaces |
 
-Optional CLI: `interpres run`, `probe`, `diagnose`, `remember on|off`, `set-folder`, `demo`, `help`.
+Changes apply the next time you press **Start recording**.
+
+### Command line
+
+`interpres run`, `probe`, `diagnose`, `remember on|off`, `set-folder`, `demo`, `help`. `interpres diagnose` prints what Interpres can read from Live Captions right now.
+
+### For developers
+
+Rust, zero crates.io dependencies. Native UI on both systems: Win32 on Windows, AppKit on Mac (compiled by `build.rs` with the system clang). On Windows, captions are read in-process through UI Automation COM (`src/platform/windows_uia.rs`) with 1.5 s connect and 2.5 s per-call timeouts and a watchdog. On Mac, they are read through the Accessibility API (`src/platform/macos.rs`) with a 2.5 s call timeout.
+
+```text
+cargo test
+cargo build --release
+powershell -NoProfile -ExecutionPolicy Bypass -File packaging\make-windows-release.ps1   # Windows zip
+bash packaging/make-double-click.sh                                                       # Mac: dist/Interpres/Interpres.app + zip
+```
+
+The `x86_64-pc-windows-gnu` toolchain needs a MinGW with `libgcc` (for example WinLibs) first on `PATH` to link tests. llvm-mingw alone fails with `unable to find library -lgcc_eh`.
+
+| File | Purpose |
+|------|---------|
+| `src/app_view.rs` | What the window shows (banner, checklist, transcript rows, auto-record), shared by both UIs |
+| `src/gui_win.rs` | Windows UI |
+| `src/gui.rs`, `native/macos/` | Mac UI (AppKit) |
+| `src/platform/windows_uia.rs` | Hand-written UI Automation COM bindings |
+| `src/platform/windows.rs` | Reader thread, watchdog, turn on / restart Live Captions |
+| `src/platform/macos.rs` | Reads Mac Live Captions through Accessibility; in-process process lookup |
+| `src/platform/macos_audio.rs` | Mac auto-record signal: an app is playing and Live Captions is captioning |
+| `src/health.rs` | Banner states and the “are you done?” prompt |
+| `src/engine.rs` | Capture loop, external-engine loop, session files, end-of-recording drain |
+| `src/plugin_host.rs` | Runs an external engine and reads its protocol lines |
+| `src/buffer.rs` | Turns the rolling caption text into finished lines |
+| `src/history_ui.rs` | Decides how each caption changes the saved lines (polishes, repeats, split sentences) |
+
+Debugging:
+- With Live Captions open, `cargo test --lib dump_live_surface -- --ignored --nocapture` (Windows) or `cargo test --lib dump_ax_tree -- --ignored --nocapture` (Mac) dumps what Live Captions exposes.
+- `INTERPRES_REPLAY=/path/to/x.debug.log cargo test --lib replay_debug_log -- --ignored --nocapture` replays a recording's caption events through the transcript writer and prints line and repeat counts.
+- `INTERPRES_SNAPSHOT=shot.png` (Mac) saves a picture of the window; `INTERPRES_SNAPSHOT_AFTER=30` delays it by 30 seconds.
 
 License: **MIT OR Apache-2.0**.

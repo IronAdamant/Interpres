@@ -12,6 +12,7 @@
 #import <Cocoa/Cocoa.h>
 #import <QuartzCore/QuartzCore.h>
 #include "interpres_gui.h"
+#include <stdlib.h>
 #include <string.h>
 
 @class IPFilledButton;
@@ -427,11 +428,14 @@ static void layoutWindow(void) {
                                                 }];
 
     /* Dev aid: INTERPRES_SNAPSHOT=/path/shot.png saves a picture of the window
-     * (README screenshots, checking the layout without Screen Recording permission). */
+     * (README screenshots, checking the layout without Screen Recording permission).
+     * INTERPRES_SNAPSHOT_AFTER=seconds delays it (default 1.5). */
     const char *snap = getenv("INTERPRES_SNAPSHOT");
     if (snap && snap[0]) {
         NSString *path = str(snap);
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        const char *after = getenv("INTERPRES_SNAPSHOT_AFTER");
+        double delay = (after && atof(after) > 0) ? atof(after) : 1.5;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
           NSView *v = g_window.contentView;
           NSBitmapImageRep *rep = [v bitmapImageRepForCachingDisplayInRect:v.bounds];
           [v cacheDisplayInRect:v.bounds toBitmapImageRep:rep];
