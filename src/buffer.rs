@@ -321,6 +321,30 @@ impl CaptionBuffer {
         self.committed.clear();
         self.stable_ticks = 0;
     }
+
+    /// Take the caption text already on screen as "seen" without saving it. Live
+    /// Captions keeps its last lines (from an earlier meeting or video) on screen, and
+    /// on Mac it re-shows them when its window comes back; recording starts now.
+    /// `keep_last`: the newest line is new speech (the window just appeared), so it is
+    /// left to be saved as usual. A line still being spoken is not lost either way: as
+    /// it grows it is a polish of a "seen" line, which is emitted as `Revised`.
+    pub fn prime(&mut self, surface: &str, keep_last: bool) {
+        let clean = clean_surface(surface);
+        let segs = segment_captions(&clean);
+        let n = segs.len();
+        for (i, seg) in segs.into_iter().enumerate() {
+            if keep_last && i + 1 == n {
+                continue;
+            }
+            if !seg.trim().is_empty() && !is_junk_line(&seg) {
+                self.committed.push(seg);
+            }
+        }
+        // The next observe diffs against this surface: seen lines are already
+        // committed, and an uncommitted newest line is saved once it settles.
+        self.previous = clean;
+        self.stable_ticks = 0;
+    }
 }
 
 fn partial_or_none(_buf: &CaptionBuffer, last: &str) -> BufferEmit {
@@ -2289,6 +2313,60 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Every caption text a run of observations saves (finals and polishes).
+    fn saved_after(buf: &mut CaptionBuffer, surfaces: &[&str]) -> Vec<String> {
+        let mut out = Vec::new();
+        for s in surfaces {
+            match buf.observe(s) {
+                BufferEmit::Final(t) | BufferEmit::Revised(t) => out.push(t),
+                BufferEmit::Finals(v) => out.extend(v),
+                BufferEmit::Batch { revised, finals } => {
+                    out.extend(revised);
+                    out.extend(finals);
+                }
+                BufferEmit::None | BufferEmit::Partial(_) => {}
+            }
+        }
+        out
+    }
+
+    // 2026-10-10: lines left on Live Captions from an earlier meeting were saved at
+    // the top of a new recording, with the new recording's time.
+    #[test]
+    fn lines_on_screen_at_start_are_not_saved() {
+        let old = "The beta goes out to 50 customers on the 20th.\nSarah, can you send the release notes by Friday?";
+        let mut b = CaptionBuffer::new();
+        b.prime(old, false);
+        let saved = saved_after(&mut b, &[old, old, old, old]);
+        assert!(saved.is_empty(), "{saved:?}");
+        // New speech after Start is saved; the old lines still are not.
+        let new = format!("{old}\nGood morning, everyone.");
+        let saved = saved_after(&mut b, &[&new, &new, &new, &new]);
+        assert_eq!(saved, vec!["Good morning, everyone."]);
+        let saved = saved_after(&mut b, &[""]);
+        assert!(saved.is_empty(), "leaving the window saves nothing old: {saved:?}");
+    }
+
+    #[test]
+    fn window_appearing_after_start_keeps_the_new_line() {
+        // Mac: the hidden Live Captions window comes back showing old lines plus the
+        // first new one.
+        let surface = "Sarah, can you send the release notes by Friday?\nThanks for joining today.";
+        let mut b = CaptionBuffer::new();
+        b.prime(surface, true);
+        let saved = saved_after(&mut b, &[surface, surface, surface]);
+        assert_eq!(saved, vec!["Thanks for joining today."]);
+    }
+
+    #[test]
+    fn line_still_being_spoken_at_start_is_kept() {
+        let mut b = CaptionBuffer::new();
+        b.prime("Old line from before.\nGood morning", false);
+        let grown = "Old line from before.\nGood morning, everyone, and thanks for joining.";
+        let saved = saved_after(&mut b, &[grown, grown, grown, grown]);
+        assert_eq!(saved, vec!["Good morning, everyone, and thanks for joining."]);
     }
 }
 

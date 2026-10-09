@@ -249,8 +249,13 @@ fn run_loop(inner: Arc<EngineInner>, tx: Sender<EngineEvent>) {
     let poll = cfg.poll_ms.max(100);
     let loop_start = Instant::now();
     let mut last_tick = Instant::now();
+    // Caption text already on screen at Start belongs to an earlier meeting: the first
+    // surface of the recording is taken as "seen" (see CaptionBuffer::prime).
+    let mut polls: u64 = 0;
+    let mut primed = false;
 
     while !inner.stop.load(Ordering::SeqCst) {
+        polls += 1;
         let poll_started = Instant::now();
         let snap = platform::poll_capture();
         let poll_took = poll_started.elapsed();
@@ -457,7 +462,17 @@ fn run_loop(inner: Arc<EngineInner>, tx: Sender<EngineEvent>) {
                     ));
                 }
 
-                if tick.process_surface {
+                if tick.process_surface && !primed {
+                    primed = true;
+                    // On screen when Start was pressed: skip it all. Window appeared
+                    // later (Mac re-shows old lines with the new one): keep the newest.
+                    let keep_last = polls > 1;
+                    buffer.prime(&surface, keep_last);
+                    crate::debuglog::log(&format!(
+                        "start: {} on-screen line(s) taken as already seen (keep_last={keep_last})",
+                        surface.lines().filter(|l| !l.trim().is_empty()).count()
+                    ));
+                } else if tick.process_surface {
                     let emit = buffer.observe(&surface);
                     apply_buffer_emit(emit, &mut writer, &tx, &mut last_live_edge, &mut surface_tr);
                 }
