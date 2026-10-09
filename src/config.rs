@@ -186,7 +186,21 @@ impl Config {
                 _ => {}
             }
         }
+        cfg.migrate_old_defaults();
         cfg
+    }
+
+    /// Early builds saved their defaults into the file, and every save rewrites every
+    /// key, so those values stuck. Replace exactly those old defaults with today's.
+    fn migrate_old_defaults(&mut self) {
+        // poll_ms default was 400 until 2026-08-07 (now 150: short lines leave quickly).
+        if self.poll_ms == 400 {
+            self.poll_ms = Config::default().poll_ms;
+        }
+        // off_delay_ms default was 2500 until 2026-08-06 (now 3500: LC detection blips).
+        if self.off_delay_ms == 2500 {
+            self.off_delay_ms = Config::default().off_delay_ms;
+        }
     }
 
     pub fn save(&self) -> std::io::Result<()> {
@@ -287,6 +301,20 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("interpres-test-cfg-{n}.conf"))
+    }
+
+    #[test]
+    fn old_saved_defaults_are_migrated() {
+        let path = temp_conf();
+        fs::write(&path, "poll_ms=400\noff_delay_ms=2500\n").unwrap();
+        let cfg = Config::load_from(&path);
+        assert_eq!(cfg.poll_ms, Config::default().poll_ms);
+        assert_eq!(cfg.off_delay_ms, Config::default().off_delay_ms);
+        // A value the user picked on purpose is kept.
+        fs::write(&path, "poll_ms=250\noff_delay_ms=5000\n").unwrap();
+        let cfg = Config::load_from(&path);
+        assert_eq!((cfg.poll_ms, cfg.off_delay_ms), (250, 5000));
+        let _ = fs::remove_file(path);
     }
 
     #[test]

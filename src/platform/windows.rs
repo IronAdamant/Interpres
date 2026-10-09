@@ -310,16 +310,28 @@ mod tests {
         assert_eq!(CREATE_NO_WINDOW, 0x0800_0000);
     }
 
-    /// Concurrent UIA client creation can E_FAIL; serialize tests that create clients.
-    static UIA_TEST_LOCK: Mutex<()> = Mutex::new(());
+    use crate::platform::UIA_TEST_LOCK;
+
+    /// Like the reader thread: client setup can fail transiently while another client
+    /// (e.g. the caption reader) is still winding down, so retry briefly.
+    fn uia_client(class: &str, ids: &[&'static str]) -> CaptionsUia {
+        let mut last = String::new();
+        for _ in 0..5 {
+            match CaptionsUia::new(class, ids) {
+                Ok(u) => return u,
+                Err(e) => last = e,
+            }
+            thread::sleep(Duration::from_millis(300));
+        }
+        panic!("UIA client: {last:?}");
+    }
 
     #[test]
     fn uia_client_initializes_with_timeouts() {
         // Exercises CoCreateInstance + CreatePropertyCondition vtable slots on this OS.
         let _g = UIA_TEST_LOCK.lock();
         unsafe { CoInitializeEx(ptr::null_mut(), COINIT_MULTITHREADED) };
-        let uia = CaptionsUia::new("LiveCaptionsDesktopWindow", &["CaptionsTextBlock", "CaptionsScrollViewer"])
-            .expect("UIA client");
+        let uia = uia_client("LiveCaptionsDesktopWindow", &["CaptionsTextBlock", "CaptionsScrollViewer"]);
         assert!(uia.has_timeouts, "IUIAutomation2 expected on Windows 10/11");
     }
 
@@ -327,8 +339,7 @@ mod tests {
     fn uia_read_without_window_reports_no_window() {
         let _g = UIA_TEST_LOCK.lock();
         unsafe { CoInitializeEx(ptr::null_mut(), COINIT_MULTITHREADED) };
-        let mut uia = CaptionsUia::new("InterpresNoSuchWindowClass", &["CaptionsTextBlock"])
-            .expect("UIA client");
+        let mut uia = uia_client("InterpresNoSuchWindowClass", &["CaptionsTextBlock"]);
         assert_eq!(uia.read(), CaptionRead::NoWindow);
     }
 

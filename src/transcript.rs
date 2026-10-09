@@ -5,23 +5,8 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::buffer::{prefer_polish, same_or_refinement};
+use crate::history_ui::{plan_family, FamilyPlan, STRONG_REPEAT_K};
 use crate::session::{format_session_stamp, unique_session_stem};
-
-/// Scan this many trailing caption lines for same-family rewrite (same window as the
-/// caption buffer: a repeat further back is a new line, not a polish).
-const FAMILY_RING_K: usize = crate::buffer::RECENT_FAMILY_K;
-
-/// Result of attempting a same-family rewrite on disk.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RewriteResult {
-    /// Replaced an existing caption line with a preferred polish.
-    Rewrote,
-    /// Same family found but candidate is not preferred (no second line).
-    NoOp,
-    /// No same-family line in the ring — caller may append.
-    NoMatch,
-}
 
 /// Writes one session's captions to a user-chosen folder.
 pub struct TranscriptWriter {
@@ -29,6 +14,9 @@ pub struct TranscriptWriter {
     stem: String,
     txt_path: PathBuf,
     txt: File,
+    /// Every line of the `.txt` file (no newlines), so a polish rewrites only the tail
+    /// from the changed line instead of re-reading and rewriting the whole file.
+    lines: Vec<String>,
     jsonl: Option<File>,
     source_label: String,
     line_count: u64,
@@ -59,10 +47,15 @@ impl TranscriptWriter {
             .open(&txt_path)?;
 
         let local_stamp = stamp.replace('_', " ");
-        writeln!(txt, "# Interpres session started {local_stamp}")?;
-        writeln!(txt, "# Source: {source_label}")?;
-        writeln!(txt, "# Folder: {}", folder.display())?;
-        writeln!(txt)?;
+        let lines = vec![
+            format!("# Interpres session started {local_stamp}"),
+            format!("# Source: {source_label}"),
+            format!("# Folder: {}", folder.display()),
+            String::new(),
+        ];
+        for l in &lines {
+            writeln!(txt, "{l}")?;
+        }
         txt.flush()?;
 
         let jsonl = if write_jsonl {
@@ -77,6 +70,7 @@ impl TranscriptWriter {
             stem,
             txt_path,
             txt,
+            lines,
             jsonl,
             source_label: source_label.to_string(),
             line_count: 0,
@@ -125,124 +119,88 @@ impl TranscriptWriter {
     }
 
     fn write_caption(&mut self, clock_hhmmss: &str, text: &str, _from_revised: bool) -> io::Result<()> {
-        let text = text.trim();
+        let text = one_line(text);
         if text.is_empty() {
             return Ok(());
         }
-        match self.try_rewrite_family(clock_hhmmss, text)? {
-            RewriteResult::Rewrote | RewriteResult::NoOp => Ok(()),
-            RewriteResult::NoMatch => self.append_caption(clock_hhmmss, text),
-        }
-    }
-
-    /// Family-aware rewrite over the last `FAMILY_RING_K` caption lines.
-    fn try_rewrite_family(&mut self, clock_hhmmss: &str, text: &str) -> io::Result<RewriteResult> {
-        let raw = fs::read_to_string(&self.txt_path)?;
-        let lines: Vec<String> = raw.lines().map(|l| l.to_string()).collect();
-        let caption_idxs: Vec<usize> = lines
+        // Recent caption lines (oldest → newest) as file line indexes.
+        let mut tail: Vec<usize> = self
+            .lines
             .iter()
             .enumerate()
+            .rev()
             .filter(|(_, l)| is_caption_line(l))
+            .take(STRONG_REPEAT_K)
             .map(|(i, _)| i)
             .collect();
-        if caption_idxs.is_empty() {
-            return Ok(RewriteResult::NoMatch);
-        }
-
-        let scan_from = caption_idxs.len().saturating_sub(FAMILY_RING_K);
-        // Most-recent family match wins.
-        let mut match_pos: Option<(usize, String)> = None;
-        for &line_i in caption_idxs[scan_from..].iter().rev() {
-            let body = caption_body(&lines[line_i]);
-            if same_or_refinement(&body, text) {
-                match_pos = Some((line_i, body));
-                break;
+        tail.reverse();
+        let bodies: Vec<String> = tail.iter().map(|&i| caption_body(&self.lines[i])).collect();
+        match plan_family(&bodies, &text) {
+            FamilyPlan::Append => self.append_caption(clock_hhmmss, &text),
+            FamilyPlan::NoOp => Ok(()),
+            FamilyPlan::Replace { at, remove } => {
+                let at = tail[at];
+                // Keep the time the line was first heard; a later polish must not move it.
+                let clock = caption_clock(&self.lines[at]).unwrap_or(clock_hhmmss).to_string();
+                self.lines[at] = format!("[{clock}] {text}");
+                // Merged sentences: drop the lines now contained in this one (all after `at`).
+                for &r in remove.iter().rev() {
+                    self.lines.remove(tail[r]);
+                }
+                self.rewrite_from(at)?;
+                if let Some(ref mut j) = self.jsonl {
+                    let esc = json_escape(&text);
+                    let src = json_escape(&self.source_label);
+                    writeln!(
+                        j,
+                        "{{\"v\":1,\"t\":\"{clock_hhmmss}\",\"kind\":\"revised\",\"src\":\"{src}\",\"text\":\"{esc}\"}}"
+                    )?;
+                    j.flush()?;
+                }
+                self.refresh_last_final();
+                Ok(())
             }
         }
-
-        let Some((line_i, existing)) = match_pos else {
-            return Ok(RewriteResult::NoMatch);
-        };
-
-        if existing == text {
-            self.sync_last_final_from_lines(&lines, &caption_idxs);
-            return Ok(RewriteResult::NoOp);
-        }
-        if !prefer_polish(&existing, text) {
-            self.sync_last_final_from_lines(&lines, &caption_idxs);
-            return Ok(RewriteResult::NoOp);
-        }
-
-        self.rewrite_line_at(line_i, clock_hhmmss, text, &lines, &caption_idxs)?;
-        Ok(RewriteResult::Rewrote)
     }
 
-    fn rewrite_line_at(
-        &mut self,
-        line_i: usize,
-        clock_hhmmss: &str,
-        text: &str,
-        lines: &[String],
-        caption_idxs: &[usize],
-    ) -> io::Result<()> {
+    /// Rewrite the file from line `from` to the end; earlier bytes are untouched, so a
+    /// crash mid-write can only affect the last few lines.
+    fn rewrite_from(&mut self, from: usize) -> io::Result<()> {
         use std::io::{Seek, SeekFrom};
-
-        // Keep the time the line was first heard; a later polish must not move it.
-        let clock = caption_clock(&lines[line_i]).unwrap_or(clock_hhmmss);
-        let mut body = String::new();
-        for (i, l) in lines.iter().enumerate() {
-            if i == line_i {
-                body.push_str(&format!("[{clock}] {text}\n"));
-            } else {
-                body.push_str(l);
-                body.push('\n');
-            }
+        let offset: u64 = self.lines[..from].iter().map(|l| l.len() as u64 + 1).sum();
+        let mut tail = String::new();
+        for l in &self.lines[from..] {
+            tail.push_str(l);
+            tail.push('\n');
         }
-        // Preserve trailing newline shape.
-        if !body.ends_with('\n') {
-            body.push('\n');
-        }
+        self.txt.set_len(offset)?;
+        self.txt.seek(SeekFrom::Start(offset))?;
+        self.txt.write_all(tail.as_bytes())?;
+        self.txt.flush()
+    }
 
-        self.txt.set_len(0)?;
-        self.txt.seek(SeekFrom::Start(0))?;
-        self.txt.write_all(body.as_bytes())?;
+    fn refresh_last_final(&mut self) {
+        self.last_final_text = self
+            .lines
+            .iter()
+            .rev()
+            .find(|l| is_caption_line(l))
+            .map(|l| caption_body(l));
+    }
+
+    /// Append a line to the file and the in-memory copy.
+    fn push_line(&mut self, line: String) -> io::Result<()> {
+        writeln!(self.txt, "{line}")?;
         self.txt.flush()?;
-
-        if let Some(ref mut j) = self.jsonl {
-            let esc = json_escape(text);
-            let src = json_escape(&self.source_label);
-            writeln!(
-                j,
-                "{{\"v\":1,\"t\":\"{clock_hhmmss}\",\"kind\":\"revised\",\"src\":\"{src}\",\"text\":\"{esc}\"}}"
-            )?;
-            j.flush()?;
-        }
-
-        // last_final_text = physical last caption body (may not be the rewritten line).
-        let new_lines: Vec<String> = body.lines().map(|l| l.to_string()).collect();
-        let last_i = *caption_idxs.last().unwrap_or(&line_i);
-        if last_i == line_i {
-            self.last_final_text = Some(text.to_string());
-        } else if last_i < new_lines.len() {
-            self.last_final_text = Some(caption_body(&new_lines[last_i]));
-        } else {
-            self.last_final_text = Some(text.to_string());
-        }
-        // line_count unchanged on rewrite.
+        self.lines.push(line);
         Ok(())
     }
 
-    fn sync_last_final_from_lines(&mut self, lines: &[String], caption_idxs: &[usize]) {
-        if let Some(&i) = caption_idxs.last() {
-            self.last_final_text = Some(caption_body(&lines[i]));
-        }
-    }
-
     fn append_caption(&mut self, clock_hhmmss: &str, text: &str) -> io::Result<()> {
-        writeln!(self.txt, "[{clock_hhmmss}] {text}")?;
-        self.txt.flush()?;
+        let text = one_line(text);
+        self.push_line(format!("[{clock_hhmmss}] {text}"))?;
         if let Some(ref mut j) = self.jsonl {
-            let esc = json_escape(text);
+            let esc = json_escape(&text);
             let src = json_escape(&self.source_label);
             writeln!(
                 j,
@@ -251,14 +209,13 @@ impl TranscriptWriter {
             j.flush()?;
         }
         self.line_count += 1;
-        self.last_final_text = Some(text.to_string());
+        self.last_final_text = Some(text);
         Ok(())
     }
 
     /// Write a `# …` note line (e.g. Live Captions turned off / back on mid-session).
     pub fn write_note(&mut self, clock_hhmmss: &str, note: &str) -> io::Result<()> {
-        writeln!(self.txt, "# [{clock_hhmmss}] {note}")?;
-        self.txt.flush()?;
+        self.push_line(format!("# [{clock_hhmmss}] {}", one_line(note)))?;
         if let Some(ref mut j) = self.jsonl {
             let esc = json_escape(note);
             writeln!(
@@ -271,9 +228,8 @@ impl TranscriptWriter {
     }
 
     pub fn end_session(&mut self, reason: &str) -> io::Result<()> {
-        writeln!(self.txt)?;
-        writeln!(self.txt, "# Session ended ({reason})")?;
-        self.txt.flush()?;
+        self.push_line(String::new())?;
+        self.push_line(format!("# Session ended ({})", one_line(reason)))?;
         if let Some(ref mut j) = self.jsonl {
             let r = json_escape(reason);
             writeln!(
@@ -284,6 +240,11 @@ impl TranscriptWriter {
         }
         Ok(())
     }
+}
+
+/// A caption is one file line: fold any embedded line breaks.
+fn one_line(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn is_caption_line(l: &str) -> bool {
@@ -536,6 +497,37 @@ mod tests {
         let bodies = caption_bodies(&path);
         assert_eq!(bodies.len(), 1);
         assert!(bodies[0].contains("continue"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn merged_polish_rewrites_only_the_tail_and_file_matches_memory() {
+        let dir = temp_dir("merge");
+        let mut w = open_writer(&dir);
+        w.write_final("10:00:01", "Does anyone have questions?").unwrap();
+        w.write_note("10:00:02", "Live Captions back on").unwrap();
+        w.write_final("10:00:03", "Second, the launch moved to the end of the quarter.").unwrap();
+        w.write_final("10:00:05", "I think that makes sense.").unwrap();
+        w.write_revised(
+            "10:00:06",
+            "Second, the launch moved to the end of the quarter, I think that makes sense.",
+        )
+        .unwrap();
+        w.write_final("10:00:09", "Next item.").unwrap();
+        w.end_session("user").unwrap();
+        let on_disk = fs::read_to_string(w.txt_path()).unwrap();
+        let expected: String = w.lines.iter().map(|l| format!("{l}\n")).collect();
+        assert_eq!(on_disk, expected);
+        let captions: Vec<&str> = on_disk.lines().filter(|l| is_caption_line(l)).collect();
+        assert_eq!(
+            captions,
+            vec![
+                "[10:00:01] Does anyone have questions?",
+                "[10:00:03] Second, the launch moved to the end of the quarter, I think that makes sense.",
+                "[10:00:09] Next item.",
+            ]
+        );
+        assert!(on_disk.contains("# [10:00:02] Live Captions back on"));
         let _ = fs::remove_dir_all(dir);
     }
 }

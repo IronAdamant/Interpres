@@ -2,10 +2,108 @@
 //!
 //! Family-aware: polish of an earlier line updates that row, not only the last row.
 
-use crate::buffer::{prefer_polish, same_or_refinement};
+use crate::buffer::{normalize_for_cmp, number_skeleton, prefer_polish, same_or_refinement, skeleton_overlaps};
 
 /// Default scan depth for same-family matches (matches transcript ring K).
 pub const HISTORY_FAMILY_K: usize = crate::buffer::RECENT_FAMILY_K;
+/// Further back than `HISTORY_FAMILY_K`, only a long unmistakable repeat matches
+/// (Live Captions re-shows an older sentence after rewriting its numbers).
+pub const STRONG_REPEAT_K: usize = 20;
+/// Letters a far-back repeat must share (a short "Yeah, that makes sense." stays new).
+const STRONG_REPEAT_MIN: usize = 40;
+/// A merged polish only absorbs earlier lines at least this long (normalized chars).
+const ABSORB_MIN: usize = 12;
+
+/// How a caption changes the recent lines.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FamilyPlan {
+    /// New sentence: add it at the end.
+    Append,
+    /// Same as (or worse than) a line already there.
+    NoOp,
+    /// Put the text at line `at` and delete the lines in `remove` (ascending, never `at`).
+    /// `remove` is non-empty when Live Captions merged earlier sentences into this one
+    /// ("A." + "B." → "A B."); the merged line keeps the earliest position and time.
+    Replace { at: usize, remove: Vec<usize> },
+}
+
+/// Decide how `text` applies to `lines` (oldest → newest). Shared by the transcript
+/// file and the window so both show the same lines.
+pub fn plan_family<S: AsRef<str>>(lines: &[S], text: &str) -> FamilyPlan {
+    let n = lines.len();
+    let near = n.saturating_sub(HISTORY_FAMILY_K);
+    let far = n.saturating_sub(STRONG_REPEAT_K);
+    // Most recent match wins.
+    let idx = (near..n)
+        .rev()
+        .find(|&i| same_or_refinement(lines[i].as_ref(), text))
+        .or_else(|| {
+            (far..near)
+                .rev()
+                .find(|&i| skeleton_overlaps(lines[i].as_ref(), text, STRONG_REPEAT_MIN))
+        });
+    let Some(idx) = idx else {
+        return FamilyPlan::Append;
+    };
+    let existing = lines[idx].as_ref();
+    if existing == text || !prefer_polish(existing, text) {
+        return FamilyPlan::NoOp;
+    }
+    // Lines directly before the match that the text repeats in full.
+    let mut keep = idx;
+    while keep > far && contains_line(text, lines[keep - 1].as_ref(), ABSORB_MIN) {
+        keep -= 1;
+    }
+    let mut absorbed: Vec<usize> = (keep..idx).collect();
+    // A long earlier version with another line in between ("A", "X", "A + more").
+    for j in (near.min(keep)..keep).rev() {
+        if contains_line(text, lines[j].as_ref(), STRONG_REPEAT_MIN) {
+            absorbed.push(j);
+        }
+    }
+    absorbed.push(idx);
+    absorbed.sort_unstable();
+    let at = absorbed.remove(0);
+    FamilyPlan::Replace { at, remove: absorbed }
+}
+
+/// `text` repeats all of `line` (ignoring case, punctuation and number style), and the
+/// line has at least `min` characters to compare.
+fn contains_line(text: &str, line: &str, min: usize) -> bool {
+    let (t, l) = (normalize_for_cmp(text), normalize_for_cmp(line));
+    if l.len() >= min && t.contains(&l) {
+        return true;
+    }
+    let (ts, ls) = (number_skeleton(text), number_skeleton(line));
+    ls.len() >= min && ts.contains(&ls)
+}
+
+/// Apply a plan to `lines` and a parallel per-line list (e.g. times); `new_side` makes
+/// the entry for an appended line.
+pub fn apply_plan<T>(
+    lines: &mut Vec<String>,
+    side: &mut Vec<T>,
+    plan: FamilyPlan,
+    text: &str,
+    new_side: impl FnOnce() -> T,
+) {
+    match plan {
+        FamilyPlan::Append => {
+            lines.push(text.to_string());
+            side.push(new_side());
+        }
+        FamilyPlan::NoOp => {}
+        FamilyPlan::Replace { at, remove } => {
+            lines[at] = text.to_string();
+            for &i in remove.iter().rev() {
+                lines.remove(i);
+                if i < side.len() {
+                    side.remove(i);
+                }
+            }
+        }
+    }
+}
 
 /// Apply a new Final caption to the in-memory Session history list.
 /// Returns (new_history, body_of_last_nonempty_row).
@@ -28,37 +126,12 @@ pub fn history_apply_revised(history: &[String], text: &str) -> (Vec<String>, St
     apply_inner(history, text, true)
 }
 
-fn apply_inner(history: &[String], text: &str, revised_only: bool) -> (Vec<String>, String) {
+fn apply_inner(history: &[String], text: &str, _revised_only: bool) -> (Vec<String>, String) {
     let mut out = history.to_vec();
-    if let Some(idx) = find_family_index(&out, text) {
-        let existing = out[idx].clone();
-        if existing == text {
-            let last = last_body(&out);
-            return (out, last);
-        }
-        if prefer_polish(&existing, text) {
-            out[idx] = text.to_string();
-        }
-        // Same family but worse/equal scrap → NoOp (never append a twin).
-        let last = last_body(&out);
-        return (out, last);
-    }
-    out.push(text.to_string());
+    let plan = plan_family(&out, text);
+    apply_plan(&mut out, &mut Vec::<()>::new(), plan, text, || ());
     let last = last_body(&out);
-    let _ = revised_only;
     (out, last)
-}
-
-fn find_family_index(history: &[String], text: &str) -> Option<usize> {
-    let start = history.len().saturating_sub(HISTORY_FAMILY_K);
-    // Most recent match wins.
-    history
-        .iter()
-        .enumerate()
-        .rev()
-        .take(history.len() - start)
-        .find(|(_, line)| same_or_refinement(line, text))
-        .map(|(i, _)| i)
 }
 
 fn last_body(history: &[String]) -> String {
@@ -135,4 +208,69 @@ mod tests {
         assert_eq!(new_h.len(), 2);
         assert_eq!(last, "Completely different topic now.");
     }
+
+    #[test]
+    fn merged_sentences_replace_their_parts() {
+        // Live run: A, B, C saved separately, then re-sent merged as "A B", "A B C".
+        let a = "I was told this last month it was originally planned for the end of twenty six.";
+        let b = "That's obviously not happening, but just like I've talked about the PS six has to come out at a certain point.";
+        let c = "This does as well you if you delay a product half a year that's easily doable.";
+        let mut h = Vec::new();
+        for t in [a, b, c] {
+            h = history_apply_final(&h, t).0;
+        }
+        let ab = "I was told this last month it was originally planned for the end of twenty six that's obviously not happening but just like I've talked about the PS six has to come out at a certain point.";
+        h = history_apply_revised(&h, ab).0;
+        assert_eq!(h, vec![ab.to_string(), c.to_string()]);
+        let abc = "I was told this last month it was originally planned for the end of twenty six that's obviously not happening but just like I've talked about the PS six has to come out at a certain point this does as well you if you delay a product half a year that's easily doable.";
+        h = history_apply_revised(&h, abc).0;
+        assert_eq!(h, vec![abc.to_string()]);
+    }
+
+    #[test]
+    fn merge_keeps_unrelated_earlier_lines_and_times() {
+        let mut lines: Vec<String> = ["Does anyone have questions?", "Second, the launch moved to the end of the quarter.", "I think that makes sense."]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let mut times = vec![1, 2, 3];
+        let merged = "Second, the launch moved to the end of the quarter, I think that makes sense.";
+        let plan = plan_family(&lines, merged);
+        assert_eq!(plan, FamilyPlan::Replace { at: 1, remove: vec![2] });
+        apply_plan(&mut lines, &mut times, plan, merged, || 0);
+        assert_eq!(lines, vec!["Does anyone have questions?".to_string(), merged.to_string()]);
+        assert_eq!(times, vec![1, 2], "merged line keeps the earliest time");
+    }
+
+    #[test]
+    fn number_rewrite_of_an_older_line_is_not_a_new_line() {
+        let old = "then screen, then and it comes with sixteen gigabytes of RAM and a two hundred dollar board.";
+        let mut h = vec![old.to_string()];
+        for i in 0..10 {
+            h.push(format!("Unrelated sentence number {i} about something else entirely."));
+        }
+        let redo = "then screen, then and it comes with 16 gigabytes of RAM and a $200 board.";
+        let (out, _) = history_apply_final(&h, redo);
+        assert_eq!(out.len(), h.len(), "re-shown line is not appended again");
+        // A short repeat that far back is a real new line.
+        let (out, _) = history_apply_final(&h, "Yeah, that makes sense.");
+        assert_eq!(out.len(), h.len() + 1);
+    }
+
+    #[test]
+    fn longer_version_absorbs_earlier_one_across_a_line() {
+        // Live run: "A", "X", then a longer "A" arrived as its own line.
+        let a = "If you were to delay this more than a year from when it was supposed to come out, I mean then you have to start asking yourself, well should we keep this node?";
+        let x = "OK let's say we do want to keep this node, OK.";
+        let a2 = "If you were to delay this more than a year from when it was supposed to come out, I mean then you have to start asking yourself, well should we keep this node if we don't keep this node then we're going to spend money porting it to a new node.";
+        let mut h = vec![a.to_string(), x.to_string()];
+        h = history_apply_revised(&h, a2).0;
+        assert_eq!(h, vec![a2.to_string(), x.to_string()], "keeps speaking order and the line between");
+        // A short line between two copies is never pulled in.
+        let mut h = vec!["OK.".to_string(), x.to_string()];
+        h = history_apply_final(&h, "OK. Fine, let's go.").0;
+        assert_eq!(h.len(), 3);
+    }
 }
+
+

@@ -777,6 +777,8 @@ fn emit_final_line(
     tx: &Sender<EngineEvent>,
     last_live_edge: &mut String,
 ) {
+    let collapsed = crate::buffer::collapse_repeats(t);
+    let t = collapsed.as_str();
     crate::debuglog::log(&format!("FINAL {t}"));
     let edge = live_edge_phrase(t);
     let edge = if edge.is_empty() {
@@ -800,6 +802,8 @@ fn emit_revised_line(
     tx: &Sender<EngineEvent>,
     last_live_edge: &mut String,
 ) {
+    let collapsed = crate::buffer::collapse_repeats(t);
+    let t = collapsed.as_str();
     crate::debuglog::log(&format!("REVISED {t}"));
     let edge = live_edge_phrase(t);
     let edge = if edge.is_empty() {

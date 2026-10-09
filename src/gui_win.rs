@@ -10,6 +10,7 @@ use crate::buffer::same_or_refinement;
 use crate::config::Config;
 use crate::engine::{CaptureEngine, EngineEvent};
 use crate::health::{Health, IdlePrompt};
+use crate::history_ui::{apply_plan, plan_family, FamilyPlan};
 use crate::platform;
 use crate::platform::windows_audio::{spawn_sound_meter, SoundLevel};
 use crate::theme::{palette_for_dark, ThemeMode};
@@ -1243,20 +1244,18 @@ fn apply_event(app: &mut AppCtx, ev: EngineEvent) {
         }
         EngineEvent::Final(s) => {
             // External engines send finished lines: list them exactly as the file does.
-            let new_lines = if engine_mode {
-                let mut l = v.lines.clone();
-                l.push(s.trim().to_string());
-                l
+            let plan = if engine_mode {
+                FamilyPlan::Append
             } else {
-                crate::history_ui::history_apply_final(&v.lines, &s).0
+                plan_family(&v.lines, s.trim())
             };
             v.idle.on_activity(now_ms);
-            apply_lines(v, new_lines);
+            apply_caption(v, plan, &s);
         }
         EngineEvent::Revised(s) => {
-            let (new_lines, _) = crate::history_ui::history_apply_revised(&v.lines, &s);
+            let plan = plan_family(&v.lines, s.trim());
             v.idle.on_activity(now_ms);
-            apply_lines(v, new_lines);
+            apply_caption(v, plan, &s);
         }
         EngineEvent::SessionFile(Some(p)) => {
             v.session_path = Some(p);
@@ -1300,16 +1299,15 @@ fn apply_event(app: &mut AppCtx, ev: EngineEvent) {
     }
 }
 
-/// History helpers only replace or append; keep a time per line in step.
-fn apply_lines(v: &mut View, new_lines: Vec<String>) {
-    while v.times.len() < new_lines.len() {
-        v.times.push(format_clock(SystemTime::now()));
+/// Apply a caption the same way the transcript file does; each line keeps the time it
+/// was first heard (a merge keeps the earliest).
+fn apply_caption(v: &mut View, plan: FamilyPlan, text: &str) {
+    let text = text.trim();
+    if text.is_empty() || matches!(plan, FamilyPlan::NoOp) {
+        return;
     }
-    v.times.truncate(new_lines.len());
-    if new_lines != v.lines {
-        v.lines = new_lines;
-        v.transcript_dirty = true;
-    }
+    apply_plan(&mut v.lines, &mut v.times, plan, text, || format_clock(SystemTime::now()));
+    v.transcript_dirty = true;
 }
 
 /// True while `pump_ui` runs: Win32 calls inside it can dispatch messages synchronously.
@@ -2563,19 +2561,17 @@ mod tests {
             stopping: false,
             idle: IdlePrompt::new(0, 0),
         };
-        let (h, _) = crate::history_ui::history_apply_final(&v.lines, "We can meet on Thursday.");
-        apply_lines(&mut v, h);
+        let add = |v: &mut View, t: &str| {
+            let plan = plan_family(&v.lines, t);
+            apply_caption(v, plan, t);
+        };
+        add(&mut v, "We can meet on Thursday.");
         let first_time = v.times[0].clone();
-        let (h, _) = crate::history_ui::history_apply_final(&v.lines, "I'll send the invite tonight.");
-        apply_lines(&mut v, h);
+        add(&mut v, "I'll send the invite tonight.");
         assert_eq!(v.lines.len(), 2);
         assert_eq!(v.times.len(), 2);
         // Polishing the first line keeps its time.
-        let (h, _) = crate::history_ui::history_apply_revised(
-            &v.lines,
-            "We can meet on Thursday, if that suits you.",
-        );
-        apply_lines(&mut v, h);
+        add(&mut v, "We can meet on Thursday, if that suits you.");
         assert_eq!(v.times.len(), v.lines.len());
         assert_eq!(v.times[0], first_time);
         assert!(v.transcript_dirty);

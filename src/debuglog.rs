@@ -3,7 +3,7 @@
 //! Enable with the UI **Debug** button, `INTERPRES_DEBUG=1`, or `debug=true` in settings.
 //! When a transcript folder is set, logs go there automatically (same place as .txt sessions).
 
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -16,6 +16,9 @@ struct DebugState {
     /// Optional per-session file name stem (e.g. session stamp).
     session_stem: Option<String>,
 }
+
+/// Open log file, reused while the path stays the same (opening per line was ~2 per poll).
+static OPEN: Mutex<Option<(PathBuf, File)>> = Mutex::new(None);
 
 static STATE: Mutex<DebugState> = Mutex::new(DebugState {
     enabled: false,
@@ -89,16 +92,30 @@ pub fn log(msg: &str) {
         return;
     }
     let path = log_path();
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&path) {
-        let _ = writeln!(f, "[{ts}] {msg}");
-        let _ = f.flush();
+    let mut open = OPEN.lock().unwrap_or_else(|e| e.into_inner());
+    if open.as_ref().is_none_or(|(p, _)| *p != path) {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        *open = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .ok()
+            .map(|f| (path, f));
+    }
+    // `File` is unbuffered: each line reaches the OS immediately (survives a crash).
+    let failed = match open.as_mut() {
+        Some((_, f)) => writeln!(f, "[{ts}] {msg}").is_err(),
+        None => false,
+    };
+    if failed {
+        // Folder removed or drive gone: reopen next time.
+        *open = None;
     }
 }
 

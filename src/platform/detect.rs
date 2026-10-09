@@ -88,6 +88,16 @@ mod toolhelp {
 }
 
 #[cfg(windows)]
+fn window_class_exists(class: &str) -> bool {
+    #[link(name = "user32")]
+    extern "system" {
+        fn FindWindowW(class: *const u16, title: *const u16) -> *mut std::os::raw::c_void;
+    }
+    let wide: Vec<u16> = class.encode_utf16().chain(std::iter::once(0)).collect();
+    !unsafe { FindWindowW(wide.as_ptr(), std::ptr::null()) }.is_null()
+}
+
+#[cfg(windows)]
 fn detect_windows() -> LiveCaptionsPresence {
     use std::os::windows::process::CommandExt;
 
@@ -95,6 +105,14 @@ fn detect_windows() -> LiveCaptionsPresence {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
     let signals = windows_signals();
+    // Fast path, every poll: the captions window exists only while Live Captions runs.
+    // Listing every process costs ~10 ms; this costs microseconds.
+    if signals.window_classes.iter().any(|c| window_class_exists(c)) {
+        return LiveCaptionsPresence {
+            running: true,
+            detail: "window found: Live Captions".into(),
+        };
+    }
     match toolhelp::any_process_named(&["LiveCaptions.exe"]) {
         Some(true) => {
             return LiveCaptionsPresence {

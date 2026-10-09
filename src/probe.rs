@@ -142,7 +142,11 @@ mod tests {
 
     #[test]
     fn probe_runs_without_panic_and_emits_status() {
+        // With Live Captions open, the probe starts the caption reader (a UIA client).
+        #[cfg(windows)]
+        let _g = crate::platform::UIA_TEST_LOCK.lock();
         let report = run_probe();
+        crate::platform::shutdown_capture();
         assert!(!report.lines.is_empty());
         let blob = report.lines.join("\n");
         assert!(blob.contains("process_running:"));

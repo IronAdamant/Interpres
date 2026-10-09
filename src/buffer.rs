@@ -1149,7 +1149,7 @@ fn looks_sentence_complete(s: &str) -> bool {
     false
 }
 
-fn normalize_for_cmp(s: &str) -> String {
+pub(crate) fn normalize_for_cmp(s: &str) -> String {
     s.chars()
         .map(|c| {
             if c.is_alphanumeric() {
@@ -1182,6 +1182,11 @@ pub fn same_or_refinement(a: &str, b: &str) -> bool {
         return true;
     }
     if na.len() >= 8 && nb.len() >= 8 && (na.contains(&nb) || nb.contains(&na)) {
+        return true;
+    }
+    // Live Captions' late number pass: "sixteen gigabytes" → "16 gigabytes",
+    // "MI four fifty five X" → "MI455X". Same words once number wording is ignored.
+    if skeleton_overlaps(a, b, SKELETON_MIN) {
         return true;
     }
 
@@ -1243,6 +1248,99 @@ pub fn same_or_refinement(a: &str, b: &str) -> bool {
     false
 }
 
+/// Shortest skeleton (letters, number words removed) trusted for a number-style match.
+const SKELETON_MIN: usize = 20;
+
+const NUMBER_WORDS: &[&str] = &[
+    "zero", "oh", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+    "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen",
+    "nineteen", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety",
+    "hundred", "thousand", "million", "billion", "trillion", "point", "percent", "dollar",
+    "dollars", "cents",
+];
+
+/// Letters only, lowercase, number words and digits dropped, no spaces:
+/// "it comes with sixteen gigabytes" and "it comes with 16 gigabytes" → same skeleton.
+pub fn number_skeleton(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut after_number = false;
+    for word in s.split(|c: char| !c.is_alphanumeric()) {
+        if word.is_empty() {
+            continue;
+        }
+        let lower = word.to_lowercase();
+        let is_number = NUMBER_WORDS.contains(&lower.as_str())
+            || lower.chars().all(|c| c.is_ascii_digit());
+        // "two hundred and fifty" ↔ "250": the "and" belongs to the number.
+        if is_number || (after_number && lower == "and") {
+            after_number = true;
+            continue;
+        }
+        after_number = false;
+        // "455x" / "mi455x": keep the letters only.
+        out.extend(lower.chars().filter(|c| c.is_alphabetic()));
+    }
+    out
+}
+
+/// One skeleton equals or contains the other, and the shorter is at least `min` letters.
+pub fn skeleton_overlaps(a: &str, b: &str, min: usize) -> bool {
+    let (sa, sb) = (number_skeleton(a), number_skeleton(b));
+    let (short, long) = if sa.len() <= sb.len() { (&sa, &sb) } else { (&sb, &sa) };
+    short.len() >= min && long.contains(short.as_str())
+}
+
+/// Collapse a word or short phrase repeated 4+ times in a row to one copy.
+/// Live Captions does this on music or noise ("screen screen screen …", "I'm like, I'm
+/// like, …"); a real "No, no, no." (3 copies) is kept.
+pub fn collapse_repeats(s: &str) -> String {
+    const MIN_COPIES: usize = 4;
+    const MAX_PHRASE: usize = 4;
+    let words: Vec<&str> = s.split_whitespace().collect();
+    if words.len() < MIN_COPIES {
+        return s.to_string();
+    }
+    let keys: Vec<String> = words
+        .iter()
+        .map(|w| {
+            w.chars()
+                .filter(|c| c.is_alphanumeric() || *c == '\'')
+                .flat_map(char::to_lowercase)
+                .collect()
+        })
+        .collect();
+    let same = |i: usize, j: usize, n: usize| (0..n).all(|k| !keys[i + k].is_empty() && keys[i + k] == keys[j + k]);
+    let mut out: Vec<&str> = Vec::with_capacity(words.len());
+    let mut i = 0;
+    let mut changed = false;
+    'scan: while i < words.len() {
+        for n in 1..=MAX_PHRASE {
+            let mut copies = 1;
+            while i + (copies + 1) * n <= words.len() && same(i, i + copies * n, n) {
+                copies += 1;
+            }
+            if copies >= MIN_COPIES {
+                out.extend_from_slice(&words[i..i + n]);
+                i += copies * n;
+                changed = true;
+                continue 'scan;
+            }
+        }
+        out.push(words[i]);
+        i += 1;
+    }
+    if !changed {
+        return s.to_string();
+    }
+    let mut joined = out.join(" ");
+    // Keep the sentence ending if the repeats swallowed it.
+    if let Some(end) = s.trim_end().chars().last().filter(|c| matches!(c, '.' | '?' | '!')) {
+        let trimmed = joined.trim_end_matches([',', ';', ':']).to_string();
+        joined = if trimmed.ends_with(['.', '?', '!']) { trimmed } else { format!("{trimmed}{end}") };
+    }
+    joined
+}
+
 /// Prefer `candidate` over `existing` when polishing a same-family caption.
 pub fn prefer_polish(existing: &str, candidate: &str) -> bool {
     line_quality(candidate) > line_quality(existing)
@@ -1268,6 +1366,43 @@ pub fn line_quality(s: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn number_style_rewrite_is_the_same_line() {
+        use super::same_or_refinement;
+        // From a live run: Live Captions rewrote numbers ~50 s later.
+        assert!(same_or_refinement(
+            "So yeah, that's like what, a two hundred and fifty three hundred dollar processor?",
+            "So yeah, that's like what, a 250, $300 processor?",
+        ));
+        assert!(same_or_refinement(
+            "They're like MI, four fifty five, X stuff for anything but AI.",
+            "They're like MI455X stuff for anything but AI.",
+        ));
+        // Short lines that differ only in numbers stay separate.
+        assert!(!same_or_refinement("Item four.", "Item five."));
+    }
+
+    #[test]
+    fn collapses_runaway_repeats_only() {
+        use super::collapse_repeats;
+        assert_eq!(
+            collapse_repeats("Well we are going to stop sharing my screen then screen the screen, screen screen screen screen screen"),
+            "Well we are going to stop sharing my screen then screen the screen,"
+        );
+        assert_eq!(
+            collapse_repeats("yeah, again, kind of like a, I'm like, I'm like, I'm like, I'm like, I'm like a, yes."),
+            "yeah, again, kind of like a, I'm like, a, yes."
+        );
+        assert_eq!(
+            collapse_repeats("then screen, then screen, then screen, then screen, then and it comes with 16 gigabytes."),
+            "then screen, then and it comes with 16 gigabytes."
+        );
+        assert_eq!(collapse_repeats("No, no, no."), "No, no, no.");
+        assert_eq!(collapse_repeats("like, like, like, like."), "like.");
+        let normal = "We can meet on Thursday, if that suits you.";
+        assert_eq!(collapse_repeats(normal), normal);
+    }
+
     #[test]
     fn settled_extension_beats_early_full_stop_at_session_end() {
         // Field: LC showed "Third sentence." then grew it but never re-punctuated.

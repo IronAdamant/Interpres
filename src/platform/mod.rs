@@ -28,6 +28,11 @@ pub struct CaptureSnapshot {
     pub error: Option<String>,
 }
 
+/// Tests that create UI Automation clients (directly, or via the caption reader when Live
+/// Captions is open) take turns: concurrent client setup can fail with E_FAIL.
+#[cfg(all(test, windows))]
+pub(crate) static UIA_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Release long-lived capture resources (Windows caption reader). No-op elsewhere.
 pub fn shutdown_capture() {
     #[cfg(windows)]
