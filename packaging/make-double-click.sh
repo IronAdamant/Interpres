@@ -125,6 +125,14 @@ cat > "$APP/Contents/Info.plist" << EOF
 </plist>
 EOF
 
+# Ad-hoc sign the whole bundle. Unsigned bundles downloaded from the internet are
+# reported as "damaged" on Apple Silicon; ad-hoc signed ones get the normal
+# "can't verify the developer" prompt (right-click → Open, or Open Anyway).
+if command -v codesign >/dev/null 2>&1; then
+  codesign --force --deep --sign - "$APP"
+  codesign --verify --deep --strict "$APP"
+fi
+
 # --- Windows double-click templates (use after building .exe on Windows) ---
 cat > "$DIST/Open Interpres.bat" << 'EOF'
 @echo off
